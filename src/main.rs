@@ -21,22 +21,48 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match &cli.command {
-        Some(Commands::Decode { input }) => decode(input)?,
+        Some(Commands::Decode { input }) => {
+            let decoded_json_value = decode(input)?;
+            println!("{}", decoded_json_value)
+        }
         None => {}
     };
 
     Ok(())
 }
 
-fn decode(input: &String) -> Result<()> {
-    let res = match input {
-        _ if input.contains(BENCODE_STRING_SPLIT_CHAR) => bdecode_string(input)?,
-        _ if input.starts_with("i") && input.ends_with("e") => bdecode_int(input)?,
-        _ => bail!("cannot decode unknown format {input}"),
+enum BencodeType {
+    String,
+    Number,
+    List,
+    Invalid,
+}
+
+impl BencodeType {
+    fn new(input: &String) -> BencodeType {
+        match input {
+            _ if input.contains(BENCODE_STRING_SPLIT_CHAR) => BencodeType::String,
+            _ if input.starts_with("i") && input.ends_with("e") => BencodeType::Number,
+            _ if input.starts_with("l") && input.ends_with("e") => BencodeType::List,
+            _ => BencodeType::Invalid,
+        }
+    }
+}
+
+fn decode(input: &String) -> Result<String> {
+    let bencode_type = BencodeType::new(input);
+    let res = match bencode_type {
+        BencodeType::String => bdecode_string(input)?,
+        BencodeType::Number => bdecode_num(input)?,
+        BencodeType::List => bdecode_list(input)?,
+        BencodeType::Invalid => bail!("dont know how to handle {input}")
     };
 
-    println!("{}", res);
-    Ok(())
+    Ok(res)
+}
+
+fn bdecode_list(input: &String) -> Result<String> {
+    todo!()
 }
 
 fn bdecode_string(input: &String) -> Result<String> {
@@ -53,7 +79,7 @@ fn bdecode_string(input: &String) -> Result<String> {
     Ok(serde_json::to_string(contents)?)
 }
 
-fn bdecode_int(input: &String) -> Result<String> {
+fn bdecode_num(input: &String) -> Result<String> {
     // endcoded like i<number>e. Number can be negative.
     let num_string = input
         .strip_prefix(BENCODE_INT_PREFIX)
