@@ -1,38 +1,47 @@
-use serde_json;
-use std::env;
+use clap::{Parser, Subcommand};
+use anyhow::Result;
 
-// Available if you need it!
-// use serde_bencode
+const BENCODE_SPLIT_CHAR: &str = ":";
 
-#[allow(dead_code)]
-fn decode_bencoded_value(encoded_value: &str) -> serde_json::Value {
-    // If encoded_value starts with a digit, it's a number
-    if encoded_value.chars().next().unwrap().is_digit(10) {
-        // Example: "5:hello" -> "hello"
-        let colon_index = encoded_value.find(':').unwrap();
-        let number_string = &encoded_value[..colon_index];
-        let number = number_string.parse::<i64>().unwrap();
-        let string = &encoded_value[colon_index + 1..colon_index + 1 + number as usize];
-        return serde_json::Value::String(string.to_string());
-    } else {
-        panic!("Unhandled encoded value: {}", encoded_value)
-    }
+#[derive(Parser)]
+#[command(version, about, long_about = None)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
 }
 
-// Usage: your_bittorrent.sh decode "<encoded_value>"
-fn main() {
-    let args: Vec<String> = env::args().collect();
-    let command = &args[1];
-
-    if command == "decode" {
-        // You can use print statements as follows for debugging, they'll be visible when running tests.
-        eprintln!("Logs from your program will appear here!");
-
-        // Uncomment this block to pass the first stage
-        // let encoded_value = &args[2];
-        // let decoded_value = decode_bencoded_value(encoded_value);
-        // println!("{}", decoded_value.to_string());
-    } else {
-        println!("unknown command: {}", args[1])
-    }
+#[derive(Subcommand)]
+enum Commands {
+    Decode{input: String}
 }
+
+fn main() -> Result<()>{
+    let cli = Cli::parse();
+
+    match &cli.command {
+    Some(Commands::Decode { input }) => {
+        decode_command(input)?
+    }
+    None => {}
+    };
+
+    Ok(())
+}
+
+fn decode_command(input: &String) -> Result<()>{
+    let decoded_json = bdecode_string(input)?;
+    println!("{}", decoded_json );
+    Ok(())
+}
+
+fn bdecode_string(input: &String) -> Result<String> {
+    // encoded like <length:contents>
+    let mut split = input.splitn(2, BENCODE_SPLIT_CHAR);
+
+    let _ = split.next().ok_or_else(|| anyhow::anyhow!("length missing before {BENCODE_SPLIT_CHAR}: input: {input}"))?;
+    let contents = split.next().ok_or_else(|| anyhow::anyhow!("content missing after {BENCODE_SPLIT_CHAR}: input: {input}"))?;
+
+
+    Ok(serde_json::to_string(contents)?)
+}
+
