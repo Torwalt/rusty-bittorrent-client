@@ -1,11 +1,12 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 
+const BENCODE_END: char = 'e';
 const BENCODE_STRING_SPLIT_CHAR: char = ':';
 const BENCODE_INT_PREFIX: char = 'i';
-const BENCODE_INT_SUFFIX: char = 'e';
+const BENCODE_INT_SUFFIX: char = BENCODE_END;
 const BENCODE_LIST_PREFIX: char = 'l';
-const BENCODE_LIST_SUFFIX: char = 'e';
+const BENCODE_LIST_SUFFIX: char = BENCODE_END;
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -46,20 +47,7 @@ enum BencodeType {
 }
 
 impl BencodeType {
-    fn new(input: &String) -> BencodeType {
-        match input {
-            _ if input.starts_with(BENCODE_INT_PREFIX) && input.ends_with(BENCODE_INT_SUFFIX) => {
-                BencodeType::Number
-            }
-            _ if input.starts_with(BENCODE_LIST_PREFIX) && input.ends_with(BENCODE_LIST_SUFFIX) => {
-                BencodeType::List
-            }
-            _ if input.contains(BENCODE_STRING_SPLIT_CHAR) => BencodeType::String,
-            _ => BencodeType::Invalid,
-        }
-    }
-
-    fn identify_char(input: &char) -> BencodeType {
+    fn new(input: &char) -> BencodeType {
         match input {
             _ if input.is_numeric() => BencodeType::String,
             _ if *input == BENCODE_INT_PREFIX => BencodeType::Number,
@@ -70,7 +58,12 @@ impl BencodeType {
 }
 
 fn decode(input: &String) -> Result<serde_json::Value> {
-    let bencode_type = BencodeType::new(input);
+    let bencode_type = BencodeType::new(
+        &input
+            .chars()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("empty input"))?,
+    );
     let res = match bencode_type {
         BencodeType::String => bdecode_string(input)?,
         BencodeType::Number => bdecode_num(input)?,
@@ -95,9 +88,13 @@ fn bdecode_list(input: &str) -> Result<ParsedValue> {
             None => break,
         };
 
-        let next_type = BencodeType::identify_char(&char);
+        if char == BENCODE_LIST_SUFFIX {
+            break;
+        }
 
-        let res = match next_type {
+        let bencode_type = BencodeType::new(&char);
+
+        let res = match bencode_type {
             BencodeType::String => bdecode_string(elements)?,
             BencodeType::Number => bdecode_num(elements)?,
             BencodeType::List => bdecode_list(elements)?,
@@ -203,6 +200,10 @@ mod tests {
             },
             TestCase {
                 input: String::from("l5:helloi52ei43e4:adade"),
+                expected: serde_json::json!(["hello", 52, 43, "adad"]),
+            },
+            TestCase {
+                input: String::from("l5:helloi52ei43e4:adade3:foo"),
                 expected: serde_json::json!(["hello", 52, 43, "adad"]),
             },
         ];
