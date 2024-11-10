@@ -35,7 +35,7 @@ fn main() -> Result<()> {
 
 struct ParsedValue {
     length: usize,
-    value: String,
+    value: serde_json::Value,
 }
 
 enum BencodeType {
@@ -48,8 +48,12 @@ enum BencodeType {
 impl BencodeType {
     fn new(input: &String) -> BencodeType {
         match input {
-            _ if input.starts_with(BENCODE_INT_PREFIX) && input.ends_with(BENCODE_INT_SUFFIX) => BencodeType::Number,
-            _ if input.starts_with(BENCODE_LIST_PREFIX) && input.ends_with(BENCODE_LIST_SUFFIX) => BencodeType::List,
+            _ if input.starts_with(BENCODE_INT_PREFIX) && input.ends_with(BENCODE_INT_SUFFIX) => {
+                BencodeType::Number
+            }
+            _ if input.starts_with(BENCODE_LIST_PREFIX) && input.ends_with(BENCODE_LIST_SUFFIX) => {
+                BencodeType::List
+            }
             _ if input.contains(BENCODE_STRING_SPLIT_CHAR) => BencodeType::String,
             _ => BencodeType::Invalid,
         }
@@ -65,7 +69,7 @@ impl BencodeType {
     }
 }
 
-fn decode(input: &String) -> Result<String> {
+fn decode(input: &String) -> Result<serde_json::Value> {
     let bencode_type = BencodeType::new(input);
     let res = match bencode_type {
         BencodeType::String => bdecode_string(input)?,
@@ -81,7 +85,7 @@ fn bdecode_list(input: &str) -> Result<ParsedValue> {
     // encoded like l5:helloi52ee
     let mut elements = &input[1..input.len() - 1];
 
-    let mut list: Vec<String> = Vec::new();
+    let mut list: Vec<serde_json::Value> = Vec::new();
 
     let mut elem_iter = elements.chars();
     let mut step = 0;
@@ -110,7 +114,7 @@ fn bdecode_list(input: &str) -> Result<ParsedValue> {
 
     Ok(ParsedValue {
         length: input.len(),
-        value: serde_json::to_string(&list)?,
+        value: serde_json::to_value(&list)?,
     })
 }
 
@@ -141,7 +145,7 @@ fn bdecode_string(input: &str) -> Result<ParsedValue> {
 
     Ok(ParsedValue {
         length: len,
-        value: serde_json::to_string(&relevant_content)?,
+        value: serde_json::to_value(&relevant_content)?,
     })
 }
 
@@ -173,7 +177,7 @@ fn bdecode_num(input: &str) -> Result<ParsedValue> {
 
     Ok(ParsedValue {
         length: len,
-        value: serde_json::to_string(&num)?,
+        value: serde_json::to_value(&num)?,
     })
 }
 
@@ -182,17 +186,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_bdecode_list() {
-        let input = String::from("l5:helloi52ee");
-        let res = bdecode_list(&input);
-        assert_eq!(res.unwrap().value, "[\"\\\"hello\\\"\",\"52\"]");
+    fn test_bdecode_list() -> Result<(), Box<dyn std::error::Error>> {
+        struct TestCase {
+            input: String,
+            expected: serde_json::Value,
+        }
 
-        let input = String::from("l5:helloi52ei43ee");
-        let res = bdecode_list(&input);
-        assert_eq!(res.unwrap().value, "[\"\\\"hello\\\"\",\"52\",\"43\"]");
+        let test_cases = vec![
+            TestCase {
+                input: String::from("l5:helloi52ee"),
+                expected: serde_json::json!(["hello", 52]),
+            },
+            TestCase {
+                input: String::from("l5:helloi52ei43ee"),
+                expected: serde_json::json!(["hello", 52, 43]),
+            },
+            TestCase {
+                input: String::from("l5:helloi52ei43e4:adade"),
+                expected: serde_json::json!(["hello", 52, 43, "adad"]),
+            },
+        ];
 
-        let input = String::from("l5:helloi52ei43e4:adade");
-        let res = bdecode_list(&input);
-        assert_eq!(res.unwrap().value, "[\"\\\"hello\\\"\",\"52\",\"43\",\"\\\"adad\\\"\"]");
+        for test_case in test_cases {
+            let decoded = bdecode_list(&test_case.input)?;
+            assert_eq!(test_case.expected, decoded.value);
+        }
+
+        Ok(())
     }
 }
