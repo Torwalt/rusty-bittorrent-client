@@ -14,7 +14,7 @@ const BENCODE_LIST_SUFFIX: char = BENCODE_END;
 const BENCODE_DICT_PREFIX: char = 'd';
 const BENCODE_DICT_SUFFIX: char = BENCODE_END;
 
-pub (crate) struct ParsedValue {
+pub(crate) struct ParsedValue {
     length: usize,
     pub value: Value,
 }
@@ -39,7 +39,7 @@ impl BencodeType {
     }
 }
 
-pub (crate) fn decode(input: &str) -> Result<ParsedValue> {
+pub(crate) fn decode(input: &str) -> Result<ParsedValue> {
     let bencode_type = BencodeType::new(
         &input
             .chars()
@@ -305,6 +305,12 @@ mod tests {
                 input: String::from("d3:foo3:bar5:helloi52e4:listl5:helloi52ee2:asi1337ee"),
                 expected: serde_json::json!(
                     {"hello": 52, "foo":"bar", "list": ["hello", 52], "as": 1337}
+                ),
+            },
+            TestCase {
+                input: String::from("d8:announce55:http://bittorrent-test-tracker.codecrafters.io/announce10:created by13:mktorrent 1.14:infod6:lengthi92063e4:name10:sample.txt12:piece lengthi32768e6:pieces1:aee"),
+                expected: serde_json::json!(
+                    {"announce": "http://bittorrent-test-tracker.codecrafters.io/announce", "created by": "mktorrent 1.1", "info": {"length": 92063, "name": "sample.txt", "piece length": 32768, "pieces": "a"}}
                 ),
             },
         ];
