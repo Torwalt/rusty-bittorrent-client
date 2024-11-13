@@ -5,9 +5,9 @@ use std::path::PathBuf;
 use url::{self, Url};
 
 use anyhow::{bail, Result};
-use decode::ParsedValue;
+use bencode::ParsedValue;
 
-use crate::decode;
+use crate::bencode;
 
 const META_URL_KEY: &str = "announce";
 const META_INFO_KEY: &str = "info";
@@ -93,23 +93,17 @@ impl Meta {
             .get(META_URL_KEY)
             .ok_or_else(|| anyhow::anyhow!("expected key {META_URL_KEY} to be present"))?
             .as_str()
-            .ok_or_else(|| {
-                anyhow::anyhow!("expected value for key {META_URL_KEY} to be string")
-            })?;
+            .ok_or_else(|| anyhow::anyhow!("expected value for key {META_URL_KEY} to be string"))?;
 
         let url = Url::parse(raw_url)?;
 
         let len = meta
             .get(META_INFO_KEY)
             .and_then(|v| v.as_object())
-            .ok_or_else(|| {
-                anyhow::anyhow!("missing or invalid object for key: {META_INFO_KEY}")
-            })?
+            .ok_or_else(|| anyhow::anyhow!("missing or invalid object for key: {META_INFO_KEY}"))?
             .get(INFO_LENGTH_KEY)
             .and_then(|v| v.as_u64())
-            .ok_or_else(|| {
-                anyhow::anyhow!("expected u64 value for key: {INFO_LENGTH_KEY}")
-            })?;
+            .ok_or_else(|| anyhow::anyhow!("expected u64 value for key: {INFO_LENGTH_KEY}"))?;
 
         return Ok(Meta {
             tracker_url: url,

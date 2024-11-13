@@ -1,11 +1,11 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
+use bencode::decode;
 use clap::{Parser, Subcommand};
-use decode::decode;
 use torrent::{parse_torrent_metadata, Meta};
 
-mod decode;
+mod bencode;
 mod torrent;
 
 #[derive(Parser)]
