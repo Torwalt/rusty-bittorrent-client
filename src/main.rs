@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use bencode::decode;
 use clap::{Parser, Subcommand};
-use torrent::{parse_torrent_metadata, Meta};
+use torrent::{Meta, TorrentFile};
 
 mod bencode;
 mod torrent;
@@ -30,9 +30,9 @@ fn main() -> Result<()> {
             println!("{}", parsed_value.value)
         }
         Some(Commands::Info { torrent_path }) => {
-            let raw_meta = parse_torrent_metadata(torrent_path)?;
-            println!("{}", raw_meta);
-            let parsed = decode(&raw_meta)?;
+            let torrent_file = TorrentFile::parse(torrent_path)?;
+            println!("{}", torrent_file);
+            let parsed = decode(&torrent_file.metadata)?;
             println!("{}", parsed.value);
             let meta = Meta::parse(&parsed)?;
             println!("{}", meta);
