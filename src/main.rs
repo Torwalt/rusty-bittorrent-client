@@ -34,8 +34,9 @@ fn main() -> Result<()> {
             println!("{}", torrent_file);
             let parsed = decode(&torrent_file.metadata)?;
             println!("{}", parsed.value);
-            let meta = Meta::parse(&parsed)?;
+            let meta = Meta::parse(&parsed, torrent_file.pieces_hashes)?;
             println!("{}", meta);
+            println!("{}", meta.info_hash()?);
         }
         None => {}
     };

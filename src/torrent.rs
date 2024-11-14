@@ -1,3 +1,6 @@
+use serde::Serialize;
+use serde_json::{Map, Value};
+use sha1_smol::Sha1;
 use std::fmt;
 use std::fs::File;
 use std::io::{BufReader, Read};
@@ -12,10 +15,12 @@ use crate::bencode;
 const META_URL_KEY: &str = "announce";
 const META_INFO_KEY: &str = "info";
 const INFO_LENGTH_KEY: &str = "length";
+const INFO_NAME_KEY: &str = "name";
+const INFO_PIECE_LENGTH_KEY: &str = "piece length";
 
 pub struct TorrentFile {
     pub metadata: String,
-    pieces_hashes: Vec<u8>,
+    pub pieces_hashes: Vec<u8>,
 }
 
 impl fmt::Display for TorrentFile {
@@ -90,26 +95,70 @@ impl TorrentFile {
 
 pub struct Meta {
     tracker_url: Url,
-    length: u64,
+    info: Info,
 }
 
-// d6:lengthi92063e4:name10:sample.txt12:piece lengthi32768e6:pieces60:<HASH>e
+#[derive(Serialize, PartialEq, Eq, Debug)]
 struct Info {
     length: u64,
+    name: String,
+    piece_length: u64,
+    pieces_data: Vec<u8>,
+}
+
+fn info_hash(info: &Info) -> Result<String> {
+    let mut hasher = Sha1::new();
+    let info_bencoded = serde_bencode::to_string(&info)?;
+    println!("{}", info_bencoded);
+
+    hasher.update(info_bencoded.as_bytes());
+    Ok(hasher.digest().to_string())
+}
+
+impl Info {
+    fn parse(decoded_info: &Map<String, Value>, pieces_data: Vec<u8>) -> Result<Info> {
+        let info_raw = decoded_info
+            .get(META_INFO_KEY)
+            .and_then(|v| v.as_object())
+            .ok_or_else(|| anyhow::anyhow!("missing or invalid object for key: {META_INFO_KEY}"))?;
+
+        let len = info_raw
+            .get(INFO_LENGTH_KEY)
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| anyhow::anyhow!("expected u64 value for key: {INFO_LENGTH_KEY}"))?;
+
+        let name = info_raw
+            .get(INFO_NAME_KEY)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("expected string value for key: {INFO_NAME_KEY}"))?
+            .to_string();
+
+        let piece_length = info_raw
+            .get(INFO_PIECE_LENGTH_KEY)
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| {
+                anyhow::anyhow!("expected u64 value for key: {INFO_PIECE_LENGTH_KEY}")
+            })?;
+
+        Ok(Info {
+            length: len,
+            name,
+            piece_length,
+            pieces_data,
+        })
+    }
 }
 
 impl fmt::Display for Meta {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "Tracker URL: {}", self.tracker_url.as_str())?;
-        writeln!(f, "Length: {}", self.length)
+        writeln!(f, "Length: {}", self.info.length)
     }
 }
 
 impl Meta {
-    // TODO: So we've bdecoded the metadata, now we need to add the pieces hash to it, encode it
-    // again and hash that string.
-    pub fn parse(parsed_metadata: &ParsedValue) -> Result<Meta> {
-        let meta = parsed_metadata
+    pub fn parse(decoded_metadata: &ParsedValue, pieces_data: Vec<u8>) -> Result<Meta> {
+        let meta = decoded_metadata
             .value
             .as_object()
             .ok_or_else(|| anyhow::anyhow!("expected a dict"))?;
@@ -122,17 +171,15 @@ impl Meta {
 
         let url = Url::parse(raw_url)?;
 
-        let len = meta
-            .get(META_INFO_KEY)
-            .and_then(|v| v.as_object())
-            .ok_or_else(|| anyhow::anyhow!("missing or invalid object for key: {META_INFO_KEY}"))?
-            .get(INFO_LENGTH_KEY)
-            .and_then(|v| v.as_u64())
-            .ok_or_else(|| anyhow::anyhow!("expected u64 value for key: {INFO_LENGTH_KEY}"))?;
+        let info = Info::parse(meta, pieces_data)?;
 
         return Ok(Meta {
             tracker_url: url,
-            length: len,
+            info,
         });
+    }
+
+    pub fn info_hash(&self) -> Result<String> {
+        info_hash(&self.info)
     }
 }
