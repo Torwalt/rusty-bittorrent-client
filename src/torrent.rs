@@ -33,7 +33,8 @@ impl TorrentFile {
     }
 
     pub fn info_hash(&self) -> Result<String> {
-        let info_encoded = serde_bencode::to_bytes(&self.metadata.info).context("could not bencode info")?;
+        let info_encoded =
+            serde_bencode::to_bytes(&self.metadata.info).context("could not bencode info")?;
 
         let mut hasher = Sha1::new();
         hasher.update(info_encoded);
