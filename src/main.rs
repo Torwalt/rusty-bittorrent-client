@@ -5,6 +5,8 @@ use bencode::decode;
 use clap::{Parser, Subcommand};
 use torrent::TorrentFile;
 
+use self::torrent::Torrent;
+
 mod bencode;
 mod torrent;
 
@@ -30,10 +32,9 @@ fn main() -> Result<()> {
             println!("{}", parsed_value.value)
         }
         Some(Commands::Info { torrent_path }) => {
-            let torrent_file = TorrentFile::parse(torrent_path)?;
-            print!("{}", torrent_file);
-            let info_hash = torrent_file.info_hash()?;
-            println!("{}", info_hash)
+            let torrent_file = TorrentFile::parse_from_file(torrent_path)?;
+            let torrent = Torrent::from_file_torrent(&torrent_file)?;
+            println!("{}", torrent)
         }
         None => {}
     };
