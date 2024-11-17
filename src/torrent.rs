@@ -11,7 +11,22 @@ use anyhow::{Context, Result};
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
 pub struct TorrentFile {
-    metadata: FileMeta,
+    #[serde(rename = "announce")]
+    tracker_url: String,
+    #[serde(rename = "created by")]
+    created_by: String,
+    info: FileInfo,
+}
+
+#[serde_as]
+#[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
+struct FileInfo {
+    length: usize,
+    name: String,
+    #[serde(rename = "piece length")]
+    piece_length: usize,
+    #[serde_as(as = "Bytes")]
+    pieces: Vec<u8>,
 }
 
 impl TorrentFile {
@@ -25,10 +40,7 @@ impl TorrentFile {
     }
 
     fn parse(content: Vec<u8>) -> Result<TorrentFile> {
-        let meta: FileMeta =
-            serde_bencode::from_bytes(&content).context("could not parse content into Meta")?;
-
-        Ok(TorrentFile { metadata: meta })
+        serde_bencode::from_bytes(&content).context("could not parse content into Meta")
     }
 }
 
@@ -47,12 +59,12 @@ impl fmt::Display for Torrent {
 
 impl Torrent {
     pub fn from_file_torrent(tf: &TorrentFile) -> Result<Torrent> {
-        let parsed_url = url::Url::parse(&tf.metadata.tracker_url)?;
-        let info = Info::from_file_info(&tf.metadata.info)?;
+        let parsed_url = url::Url::parse(&tf.tracker_url)?;
+        let info = Info::from_file_info(&tf.info)?;
 
         Ok(Torrent {
             tracker_url: parsed_url,
-            created_by: tf.metadata.created_by.clone(),
+            created_by: tf.created_by.clone(),
             info,
         })
     }
@@ -117,34 +129,14 @@ struct Piece {
     hash: Vec<u8>,
 }
 
-fn hash_to_hex(hash: &Vec<u8>) -> String {
-    hash.iter().map(|byte| format!("{:02x}", byte)).collect()
-}
-
 impl fmt::Display for Piece {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "{}", hash_to_hex(&self.hash))
     }
 }
 
-#[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
-struct FileMeta {
-    #[serde(rename = "announce")]
-    tracker_url: String,
-    #[serde(rename = "created by")]
-    created_by: String,
-    info: FileInfo,
-}
-
-#[serde_as]
-#[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
-struct FileInfo {
-    length: usize,
-    name: String,
-    #[serde(rename = "piece length")]
-    piece_length: usize,
-    #[serde_as(as = "Bytes")]
-    pieces: Vec<u8>,
+fn hash_to_hex(hash: &Vec<u8>) -> String {
+    hash.iter().map(|byte| format!("{:02x}", byte)).collect()
 }
 
 #[cfg(test)]
