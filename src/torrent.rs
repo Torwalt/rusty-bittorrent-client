@@ -50,6 +50,12 @@ pub struct Torrent {
     info: Info,
 }
 
+pub struct Request {
+    pub url: Url,
+    pub info_hash: Vec<u8>,
+    pub length: usize,
+}
+
 impl fmt::Display for Torrent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "Tracker URL: {}", self.tracker_url)?;
@@ -67,6 +73,15 @@ impl Torrent {
             created_by: tf.created_by.clone(),
             info,
         })
+    }
+
+    pub fn to_request(&self) -> Request {
+        Request {
+            // Cloning is ok here, as it is done once per file.
+            url: self.tracker_url.clone(),
+            info_hash: self.info.hash.clone(),
+            length: self.info.length,
+        }
     }
 }
 
