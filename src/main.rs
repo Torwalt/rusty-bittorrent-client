@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use bencode::decode;
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use torrent::TorrentFile;
 
 use self::torrent::Torrent;
@@ -19,11 +19,22 @@ struct Cli {
     command: Option<Commands>,
 }
 
-#[derive(Subcommand)]
+#[derive(Parser)]
 enum Commands {
-    Decode { input: String },
-    Info { torrent_path: PathBuf },
-    Peers { torrent_path: PathBuf },
+    Decode {
+        input: String,
+    },
+    Info {
+        torrent_path: PathBuf,
+    },
+    Peers {
+        torrent_path: PathBuf,
+    },
+    Handshake {
+        torrent_path: PathBuf,
+        #[arg(value_parser = clap::value_parser!(tracker::Peer))]
+        peer: tracker::Peer,
+    },
 }
 
 fn main() -> Result<()> {
@@ -46,6 +57,13 @@ fn main() -> Result<()> {
             let peers = client.find_peers(torrent.to_request())?;
             println!("{}", peers)
         }
+        Some(Commands::Handshake { torrent_path, peer }) => {
+            let torrent_file = TorrentFile::parse_from_file(torrent_path)?;
+            let torrent = Torrent::from_file_torrent(&torrent_file)?;
+            let client = Client::new()?;
+            let handshake = client.perform_handshake(peer, torrent.to_request())?;
+            println!("{}", handshake)
+        },
         None => {}
     };
 

@@ -1,4 +1,6 @@
 use core::fmt;
+use std::io::{Read, Write};
+use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -9,9 +11,12 @@ use serde_with::{serde_as, Bytes};
 
 use crate::torrent;
 
-// PORT is a hardcoded port number.
+// PORT is for now just hardcoded.
 const PORT: usize = 6881;
 const ID_SIZE: usize = 20;
+const PEER_BYTE_SIZE: usize = 6;
+// lol
+const HANDSHAKE_BYTE_SIZE: usize = 68;
 
 struct QueryParams<'a> {
     info_hash: &'a str,
@@ -52,7 +57,7 @@ impl Peers {
 
     fn from_peer_response(pr: PeerResponse) -> Result<Peers> {
         let mut out = Vec::new();
-        let chunks = pr.peers.chunks(6);
+        let chunks = pr.peers.chunks(PEER_BYTE_SIZE);
         for chunk in chunks {
             let p = Peer::from_bytes(chunk)?;
             out.push(p);
@@ -71,9 +76,23 @@ impl fmt::Display for Peers {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct Peer {
-    ip: String,
+    ip: IpAddr,
     port: u16,
+}
+
+impl std::str::FromStr for Peer {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Peer, String> {
+        s.parse::<SocketAddr>()
+            .map(|addr| Peer {
+                ip: addr.ip(),
+                port: addr.port(),
+            })
+            .map_err(|_| format!("Invalid Peer SocketAddr: {}", s))
+    }
 }
 
 impl Peer {
@@ -85,16 +104,63 @@ impl Peer {
             ));
         }
 
-        let octet1 = b[0];
-        let octet2 = b[1];
-        let octet3 = b[2];
-        let octet4 = b[3];
+        let ip_bytes: [u8; 4] = [b[0], b[1], b[2], b[3]];
         let port_bytes: [u8; 2] = [b[4], b[5]];
 
-        let ip = format!("{}.{}.{}.{}", octet1, octet2, octet3, octet4);
+        let ip = IpAddr::from(ip_bytes);
         let port = u16::from_be_bytes(port_bytes);
 
         Ok(Peer { ip, port })
+    }
+
+    fn to_string(&self) -> String {
+        return format!("{}:{}", self.ip, self.port);
+    }
+}
+
+pub struct Handshake {
+    info_hash: Vec<u8>,
+    peer_id: String,
+}
+
+impl fmt::Display for Handshake {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "Peer ID: {}", self.peer_id)
+    }
+}
+
+impl Handshake {
+    fn new(info_hash: Vec<u8>, peer_id: &String) -> Handshake {
+        Handshake {
+            info_hash,
+            peer_id: peer_id.to_string(),
+        }
+    }
+
+    fn to_bytes(&self) -> [u8; HANDSHAKE_BYTE_SIZE] {
+        /*
+            length of the protocol string (BitTorrent protocol) which is 19 (1 byte)
+            the string BitTorrent protocol (19 bytes)
+            eight reserved bytes, which are all set to zero (8 bytes)
+            sha1 infohash (20 bytes) (NOT the hexadecimal representation, which is 40 bytes long)
+            peer id (20 bytes) (generate 20 random byte values)
+        */
+        let mut out = [0; HANDSHAKE_BYTE_SIZE];
+
+        const PROTOCOL: &str = "BitTorrent protocol";
+        const PROTOCOL_LEN: u8 = PROTOCOL.len() as u8;
+
+        out[0] = PROTOCOL_LEN;
+        out[1..20].copy_from_slice(&PROTOCOL.as_bytes());
+        // out[20..28] -> Reserved
+        out[28..48].copy_from_slice(&self.info_hash);
+        out[48..68].copy_from_slice(&self.peer_id.as_bytes());
+
+        out
+    }
+
+    fn from_bytes(bytes: [u8; HANDSHAKE_BYTE_SIZE]) -> Result<Handshake> {
+        todo!()
     }
 }
 
@@ -112,6 +178,25 @@ impl Client {
             peer_id: id,
             inner: client,
         })
+    }
+
+    pub fn perform_handshake(&self, peer: &Peer, req: torrent::Request) -> Result<Handshake> {
+        let handshake = Handshake::new(req.info_hash, &self.peer_id);
+        let bytes = handshake.to_bytes();
+        let mut stream = TcpStream::connect(peer.to_string())?;
+
+        stream.write_all(&bytes)?;
+
+        let mut buf = [0; HANDSHAKE_BYTE_SIZE];
+        let total_read = 0;
+        while total_read < HANDSHAKE_BYTE_SIZE {
+            let bytes_read = stream.read(&mut buf[total_read..])?;
+            if bytes_read == 0 {
+                bail!("Connection closed before handshake was fully read")
+            }
+        }
+
+        Handshake::from_bytes(buf)
     }
 
     pub fn find_peers(&self, req: torrent::Request) -> Result<Peers> {
