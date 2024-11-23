@@ -43,8 +43,8 @@ fn main() -> Result<()> {
             let torrent_file = TorrentFile::parse_from_file(torrent_path)?;
             let torrent = Torrent::from_file_torrent(&torrent_file)?;
             let client = Client::new()?;
-            let _resp = client.find_peers(torrent.to_request())?;
-            println!("success!")
+            let peers = client.find_peers(torrent.to_request())?;
+            println!("{}", peers)
         }
         None => {}
     };
