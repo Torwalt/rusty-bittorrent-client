@@ -120,12 +120,17 @@ impl Peer {
 
 pub struct Handshake {
     info_hash: Vec<u8>,
-    peer_id: String,
+    peer_id: Vec<u8>,
 }
 
 impl fmt::Display for Handshake {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "Peer ID: {}", self.peer_id)
+        let hex_representation: String = self
+            .peer_id
+            .iter()
+            .map(|byte| format!("{:02x}", byte))
+            .collect();
+        writeln!(f, "Peer ID: {}", hex_representation)
     }
 }
 
@@ -133,7 +138,7 @@ impl Handshake {
     fn new(info_hash: Vec<u8>, peer_id: &String) -> Handshake {
         Handshake {
             info_hash,
-            peer_id: peer_id.to_string(),
+            peer_id: peer_id.as_bytes().to_vec(),
         }
     }
 
@@ -154,13 +159,16 @@ impl Handshake {
         out[1..20].copy_from_slice(&PROTOCOL.as_bytes());
         // out[20..28] -> Reserved
         out[28..48].copy_from_slice(&self.info_hash);
-        out[48..68].copy_from_slice(&self.peer_id.as_bytes());
+        out[48..68].copy_from_slice(&self.peer_id);
 
         out
     }
 
-    fn from_bytes(bytes: [u8; HANDSHAKE_BYTE_SIZE]) -> Result<Handshake> {
-        todo!()
+    fn from_bytes(data: [u8; HANDSHAKE_BYTE_SIZE]) -> Result<Handshake> {
+        Ok(Handshake {
+            info_hash: data[28..48].to_vec(),
+            peer_id: data[48..68].to_vec(),
+        })
     }
 }
 
@@ -188,12 +196,13 @@ impl Client {
         stream.write_all(&bytes)?;
 
         let mut buf = [0; HANDSHAKE_BYTE_SIZE];
-        let total_read = 0;
+        let mut total_read = 0;
         while total_read < HANDSHAKE_BYTE_SIZE {
             let bytes_read = stream.read(&mut buf[total_read..])?;
             if bytes_read == 0 {
                 bail!("Connection closed before handshake was fully read")
             }
+            total_read += bytes_read;
         }
 
         Handshake::from_bytes(buf)
