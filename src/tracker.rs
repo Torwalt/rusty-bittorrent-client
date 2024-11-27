@@ -3,7 +3,7 @@ use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpStream};
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use rand::distributions::Alphanumeric;
 use rand::Rng;
 use serde::Deserialize;
@@ -172,6 +172,58 @@ impl Handshake {
     }
 }
 
+#[derive(Debug)]
+enum PeerMessage {
+    Bitfield,
+    Interested,
+    Unchoke,
+    Request(RequestMessage),
+    Piece,
+}
+
+impl PeerMessage {
+    fn from_bytes(bytes: &[u8]) -> Result<PeerMessage> {
+        match bytes.first().ok_or(anyhow!("empty bytes given"))? {
+            1 => Ok(Self::Unchoke),
+            2 => Ok(Self::Interested),
+            5 => Ok(Self::Bitfield),
+            6 => {
+                let msg = RequestMessage::from_bytes(bytes)?;
+                Ok(Self::Request(msg))
+            }
+            7 => Ok(Self::Piece),
+            _ => bail!("unknown byte message id"),
+        }
+    }
+
+    fn to_bytes(&self) -> &[u8] {
+        match self {
+            PeerMessage::Unchoke => &[1],
+            PeerMessage::Interested => &[0, 0, 0, 1, 2],
+            PeerMessage::Bitfield => &[5],
+            PeerMessage::Request(msg) => msg.to_bytes(),
+            PeerMessage::Piece => &[6],
+        }
+    }
+}
+
+#[derive(Debug)]
+struct RequestMessage {
+    index: usize,
+    begin: usize,
+    length: usize,
+}
+
+impl RequestMessage {
+    fn from_bytes(bytes: &[u8]) -> Result<RequestMessage> {
+        unimplemented!()
+    }
+
+    fn to_bytes(&self) -> &[u8] {
+        unimplemented!()
+    }
+}
+
 impl Client {
     pub fn new() -> Result<Client> {
         let id = rand::thread_rng()
@@ -188,10 +240,51 @@ impl Client {
         })
     }
 
+    pub fn download_piece(&self, peer: &Peer, req: torrent::Request) -> Result<()> {
+        let mut stream = TcpStream::connect(peer.to_string())?;
+        self.handshake(req, &mut stream)?;
+        let mut len_buf: [u8; 4] = [0; 4];
+
+        // Bitfield
+        stream.read_exact(&mut len_buf)?;
+        let next_buf_size = u32::from_be_bytes(len_buf);
+        if next_buf_size == 0 {
+            bail!("got 0 size message - Bitfield")
+        }
+        let mut bitfield_buf = vec![0; next_buf_size as usize];
+        stream.read_exact(&mut bitfield_buf)?;
+        match PeerMessage::from_bytes(&bitfield_buf)? {
+            PeerMessage::Bitfield => {}
+            other => bail!("expected Bitfield PeerMessage, got {:?}", other),
+        }
+
+        stream.write_all(PeerMessage::Interested.to_bytes())?;
+
+        let mut unchoke_buf: [u8; 5] = [0; 5];
+        stream.read_exact(&mut unchoke_buf)?;
+        match PeerMessage::from_bytes(&unchoke_buf)? {
+            PeerMessage::Unchoke => {}
+            other => bail!("expected Unchoke PeerMessage, got {:?}", other),
+        }
+
+        // TODO: Now we need to download a piece. We need to change torrent::Request to something
+        // like a torrent::PeerRequest and torrent::DownloadRequest or so, as we now need the
+        // actual Piece hashes. A RequestMessage is sent for a Block of a Piece. A Piece' length is
+        // dynamic, so we need to split a Piece into constant length blocks of 16 kiB. After each
+        // Block Request a Piece Response can be read. Combine the Blocks into a Piece. Check
+        // integrity of Piece by comparing it with the hash of the torrent file.
+
+        Ok(())
+    }
+
     pub fn perform_handshake(&self, peer: &Peer, req: torrent::Request) -> Result<Handshake> {
+        let mut stream = TcpStream::connect(peer.to_string())?;
+        self.handshake(req, &mut stream)
+    }
+
+    fn handshake(&self, req: torrent::Request, stream: &mut TcpStream) -> Result<Handshake> {
         let handshake = Handshake::new(req.info_hash, &self.peer_id);
         let bytes = handshake.to_bytes();
-        let mut stream = TcpStream::connect(peer.to_string())?;
 
         stream.write_all(&bytes)?;
 
