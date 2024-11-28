@@ -44,16 +44,24 @@ impl TorrentFile {
     }
 }
 
+pub struct PeerRequest<'a> {
+    pub url: Url,
+    pub info_hash: &'a InfoHash,
+    pub length: usize,
+}
+
+pub struct DownloadRequest<'a> {
+    pub length: usize,
+    pub piece_length: usize,
+    pub pieces: &'a [Piece],
+    // TODO: Should be static.
+    pub info_hash: &'a InfoHash,
+}
+
 pub struct Torrent {
     tracker_url: Url,
     created_by: String,
     info: Info,
-}
-
-pub struct Request {
-    pub url: Url,
-    pub info_hash: Vec<u8>,
-    pub length: usize,
 }
 
 impl fmt::Display for Torrent {
@@ -75,28 +83,39 @@ impl Torrent {
         })
     }
 
-    pub fn to_request(&self) -> Request {
-        Request {
+    pub fn to_peer_request(&self) -> PeerRequest {
+        PeerRequest {
             // Cloning is ok here, as it is done once per file.
             url: self.tracker_url.clone(),
-            info_hash: self.info.hash.clone(),
+            info_hash: &self.info.hash,
             length: self.info.length,
         }
     }
+
+    pub fn to_download_request(&self) -> DownloadRequest {
+        DownloadRequest {
+            length: self.info.length,
+            piece_length: self.info.piece_length,
+            pieces: self.info.pieces.as_slice(),
+            info_hash: &self.info.hash,
+        }
+    }
 }
+
+pub struct InfoHash(pub [u8; 20]);
 
 struct Info {
     length: usize,
     name: String,
     piece_length: usize,
     pieces: Vec<Piece>,
-    hash: Vec<u8>,
+    hash: InfoHash,
 }
 
 impl fmt::Display for Info {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "Length: {}", self.length)?;
-        writeln!(f, "Info Hash {}", hash_to_hex(&self.hash))?;
+        writeln!(f, "Info Hash {}", hash_to_hex(&self.hash.0))?;
         writeln!(f, "Piece Length: {}", self.piece_length)?;
         writeln!(f, "Piece Hashes")?;
         for p in &self.pieces {
@@ -125,23 +144,23 @@ impl Info {
             name: fi.name.clone(),
             piece_length: fi.piece_length,
             pieces,
-            hash,
+            hash: InfoHash(hash),
         })
     }
 
-    fn hash(fi: &FileInfo) -> Result<Vec<u8>> {
+    fn hash(fi: &FileInfo) -> Result<[u8; 20]> {
         let info_encoded = serde_bencode::to_bytes(fi).context("could not bencode info")?;
 
         let mut hasher = Sha1::new();
         hasher.update(info_encoded);
         let res = hasher.finalize();
 
-        Ok(res.to_vec())
+        Ok(res.into())
     }
 }
 
-struct Piece {
-    hash: Vec<u8>,
+pub struct Piece {
+    pub hash: Vec<u8>,
 }
 
 impl fmt::Display for Piece {
@@ -150,7 +169,7 @@ impl fmt::Display for Piece {
     }
 }
 
-fn hash_to_hex(hash: &Vec<u8>) -> String {
+fn hash_to_hex(hash: &[u8]) -> String {
     hash.iter().map(|byte| format!("{:02x}", byte)).collect()
 }
 

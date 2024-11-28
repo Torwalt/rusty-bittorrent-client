@@ -54,16 +54,16 @@ fn main() -> Result<()> {
             let torrent_file = TorrentFile::parse_from_file(torrent_path)?;
             let torrent = Torrent::from_file_torrent(&torrent_file)?;
             let client = Client::new()?;
-            let peers = client.find_peers(torrent.to_request())?;
+            let peers = client.find_peers(torrent.to_peer_request())?;
             println!("{}", peers)
         }
         Some(Commands::Handshake { torrent_path, peer }) => {
             let torrent_file = TorrentFile::parse_from_file(torrent_path)?;
             let torrent = Torrent::from_file_torrent(&torrent_file)?;
             let client = Client::new()?;
-            let handshake = client.perform_handshake(peer, torrent.to_request())?;
+            let handshake = client.perform_handshake(peer, &torrent.to_peer_request().info_hash)?;
             println!("{}", handshake)
-        },
+        }
         None => {}
     };
 

@@ -15,8 +15,11 @@ use crate::torrent;
 const PORT: usize = 6881;
 const ID_SIZE: usize = 20;
 const PEER_BYTE_SIZE: usize = 6;
-// lol
 const HANDSHAKE_BYTE_SIZE: usize = 68;
+const BLOCK_SIZE: usize = 16 * 1024;
+const INDEX_SIZE: usize = 32;
+const BEGIN_SIZE: usize = 32;
+const PIECE_BUF_SIZE: usize = BEGIN_SIZE + INDEX_SIZE + BLOCK_SIZE;
 
 struct QueryParams<'a> {
     info_hash: &'a str,
@@ -119,7 +122,7 @@ impl Peer {
 }
 
 pub struct Handshake {
-    info_hash: Vec<u8>,
+    info_hash: torrent::InfoHash,
     peer_id: Vec<u8>,
 }
 
@@ -135,9 +138,9 @@ impl fmt::Display for Handshake {
 }
 
 impl Handshake {
-    fn new(info_hash: Vec<u8>, peer_id: &String) -> Handshake {
+    fn new(info_hash: &torrent::InfoHash, peer_id: &String) -> Handshake {
         Handshake {
-            info_hash,
+            info_hash: torrent::InfoHash(info_hash.0.to_owned()),
             peer_id: peer_id.as_bytes().to_vec(),
         }
     }
@@ -158,15 +161,19 @@ impl Handshake {
         out[0] = PROTOCOL_LEN;
         out[1..20].copy_from_slice(&PROTOCOL.as_bytes());
         // out[20..28] -> Reserved
-        out[28..48].copy_from_slice(&self.info_hash);
+        out[28..48].copy_from_slice(&self.info_hash.0);
         out[48..68].copy_from_slice(&self.peer_id);
 
         out
     }
 
     fn from_bytes(data: [u8; HANDSHAKE_BYTE_SIZE]) -> Result<Handshake> {
+        let info_hash: [u8; 20] = data[28..48]
+            .try_into()
+            .context("when converting to info_hash")?;
+
         Ok(Handshake {
-            info_hash: data[28..48].to_vec(),
+            info_hash: torrent::InfoHash(info_hash),
             peer_id: data[48..68].to_vec(),
         })
     }
@@ -178,7 +185,7 @@ enum PeerMessage {
     Interested,
     Unchoke,
     Request(RequestMessage),
-    Piece,
+    Piece(PieceMessage),
 }
 
 impl PeerMessage {
@@ -191,7 +198,10 @@ impl PeerMessage {
                 let msg = RequestMessage::from_bytes(bytes)?;
                 Ok(Self::Request(msg))
             }
-            7 => Ok(Self::Piece),
+            7 => {
+                let msg = PieceMessage::from_bytes(bytes)?;
+                Ok(Self::Piece(msg))
+            }
             _ => bail!("unknown byte message id"),
         }
     }
@@ -202,8 +212,25 @@ impl PeerMessage {
             PeerMessage::Interested => &[0, 0, 0, 1, 2],
             PeerMessage::Bitfield => &[5],
             PeerMessage::Request(msg) => msg.to_bytes(),
-            PeerMessage::Piece => &[6],
+            PeerMessage::Piece(msg) => msg.to_bytes(),
         }
+    }
+}
+
+#[derive(Debug)]
+struct PieceMessage {
+    index: u32,
+    begin: u32,
+    block: [u8; BLOCK_SIZE],
+}
+
+impl PieceMessage {
+    fn to_bytes(&self) -> &[u8] {
+        unimplemented!()
+    }
+
+    fn from_bytes(b: &[u8]) -> Result<PieceMessage> {
+        unimplemented!()
     }
 }
 
@@ -240,9 +267,14 @@ impl Client {
         })
     }
 
-    pub fn download_piece(&self, peer: &Peer, req: torrent::Request) -> Result<()> {
+    pub fn download_piece(
+        &self,
+        peer: &Peer,
+        req: torrent::DownloadRequest,
+        piece_idx: usize,
+    ) -> Result<()> {
         let mut stream = TcpStream::connect(peer.to_string())?;
-        self.handshake(req, &mut stream)?;
+        self.handshake(req.info_hash, &mut stream)?;
         let mut len_buf: [u8; 4] = [0; 4];
 
         // Bitfield
@@ -274,16 +306,70 @@ impl Client {
         // Block Request a Piece Response can be read. Combine the Blocks into a Piece. Check
         // integrity of Piece by comparing it with the hash of the torrent file.
 
+        let piece = req
+            .pieces
+            .get(piece_idx)
+            .ok_or(anyhow!("no piece at index {}", piece_idx))?;
+
+        let mut chunks = piece.hash.chunks_exact(BLOCK_SIZE);
+        let mut offset = 0;
+        let mut iter_cnt = 0;
+        let mut piece_buf: [u8; PIECE_BUF_SIZE] = [0; PIECE_BUF_SIZE];
+        let mut piece_msgs: Vec<PieceMessage> = Vec::new();
+        let mut breaker = false;
+        loop {
+            let len = match chunks.next() {
+                Some(_) => BLOCK_SIZE,
+                None => {
+                    breaker = true;
+                    chunks.remainder().len()
+                }
+            };
+
+            let req = RequestMessage {
+                index: piece_idx,
+                begin: offset,
+                length: len,
+            };
+            let payload = req.to_bytes();
+            stream.write_all(payload)?;
+
+            stream.read_exact(&mut piece_buf)?;
+            let piece_msg = match PeerMessage::from_bytes(&piece_buf)? {
+                PeerMessage::Piece(piece) => piece,
+                other => bail!("expected Piece PeerMessage, got {:?}", other),
+            };
+            piece_msgs.push(piece_msg);
+
+            if breaker {
+                break;
+            }
+
+            iter_cnt += 1;
+            offset = iter_cnt * BLOCK_SIZE;
+        }
+
+        // TODO: We combine the PieceMessages into a Piece and validate its integrity by comparing
+        // its hash with the one from the torrent file.
+
         Ok(())
     }
 
-    pub fn perform_handshake(&self, peer: &Peer, req: torrent::Request) -> Result<Handshake> {
+    pub fn perform_handshake(
+        &self,
+        peer: &Peer,
+        info_hash: &torrent::InfoHash,
+    ) -> Result<Handshake> {
         let mut stream = TcpStream::connect(peer.to_string())?;
-        self.handshake(req, &mut stream)
+        self.handshake(info_hash, &mut stream)
     }
 
-    fn handshake(&self, req: torrent::Request, stream: &mut TcpStream) -> Result<Handshake> {
-        let handshake = Handshake::new(req.info_hash, &self.peer_id);
+    fn handshake(
+        &self,
+        info_hash: &torrent::InfoHash,
+        stream: &mut TcpStream,
+    ) -> Result<Handshake> {
+        let handshake = Handshake::new(info_hash, &self.peer_id);
         let bytes = handshake.to_bytes();
 
         stream.write_all(&bytes)?;
@@ -301,8 +387,8 @@ impl Client {
         Handshake::from_bytes(buf)
     }
 
-    pub fn find_peers(&self, req: torrent::Request) -> Result<Peers> {
-        let hash_url_encoded = urlencoding::encode_binary(&req.info_hash);
+    pub fn find_peers(&self, req: torrent::PeerRequest) -> Result<Peers> {
+        let hash_url_encoded = urlencoding::encode_binary(&req.info_hash.0);
 
         let query_params = QueryParams {
             info_hash: &hash_url_encoded.into_owned(),
