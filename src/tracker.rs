@@ -8,6 +8,7 @@ use rand::distributions::Alphanumeric;
 use rand::Rng;
 use serde::Deserialize;
 use serde_with::{serde_as, Bytes};
+use sha1::{Digest, Sha1};
 
 use crate::torrent;
 
@@ -202,7 +203,7 @@ impl PeerMessage {
                 let msg = PieceMessage::from_bytes(bytes)?;
                 Ok(Self::Piece(msg))
             }
-            _ => bail!("unknown byte message id"),
+            other => bail!("unknown byte message id: {}", other),
         }
     }
 
@@ -272,10 +273,12 @@ impl Client {
         peer: &Peer,
         req: torrent::DownloadRequest,
         piece_idx: usize,
-    ) -> Result<()> {
+    ) -> Result<Vec<u8>> {
         let mut stream = TcpStream::connect(peer.to_string())?;
         self.handshake(req.info_hash, &mut stream)?;
         let mut len_buf: [u8; 4] = [0; 4];
+
+        // TODO: Read len AND id into buffer and then assign payload buffer.
 
         // Bitfield
         stream.read_exact(&mut len_buf)?;
@@ -299,31 +302,24 @@ impl Client {
             other => bail!("expected Unchoke PeerMessage, got {:?}", other),
         }
 
-        // TODO: Now we need to download a piece. We need to change torrent::Request to something
-        // like a torrent::PeerRequest and torrent::DownloadRequest or so, as we now need the
-        // actual Piece hashes. A RequestMessage is sent for a Block of a Piece. A Piece' length is
-        // dynamic, so we need to split a Piece into constant length blocks of 16 kiB. After each
-        // Block Request a Piece Response can be read. Combine the Blocks into a Piece. Check
-        // integrity of Piece by comparing it with the hash of the torrent file.
-
         let piece = req
             .pieces
             .get(piece_idx)
             .ok_or(anyhow!("no piece at index {}", piece_idx))?;
 
-        let mut chunks = piece.hash.chunks_exact(BLOCK_SIZE);
+        let mut block_counter = 0;
         let mut offset = 0;
         let mut iter_cnt = 0;
         let mut piece_buf: [u8; PIECE_BUF_SIZE] = [0; PIECE_BUF_SIZE];
-        let mut piece_msgs: Vec<PieceMessage> = Vec::new();
+        let mut piece_data: Vec<u8> = Vec::new();
         let mut breaker = false;
         loop {
-            let len = match chunks.next() {
-                Some(_) => BLOCK_SIZE,
-                None => {
-                    breaker = true;
-                    chunks.remainder().len()
-                }
+            block_counter += BLOCK_SIZE;
+            let len = if block_counter < req.piece_length {
+                BLOCK_SIZE
+            } else {
+                breaker = true;
+                req.piece_length - (block_counter - BLOCK_SIZE)
             };
 
             let req = RequestMessage {
@@ -339,7 +335,7 @@ impl Client {
                 PeerMessage::Piece(piece) => piece,
                 other => bail!("expected Piece PeerMessage, got {:?}", other),
             };
-            piece_msgs.push(piece_msg);
+            piece_data.append(&mut piece_msg.block.to_vec());
 
             if breaker {
                 break;
@@ -349,10 +345,19 @@ impl Client {
             offset = iter_cnt * BLOCK_SIZE;
         }
 
-        // TODO: We combine the PieceMessages into a Piece and validate its integrity by comparing
-        // its hash with the one from the torrent file.
+        let mut hasher = Sha1::new();
+        hasher.update(&piece_data);
+        let downloaded_piece_hash: [u8; 20] = hasher.finalize().into();
 
-        Ok(())
+        if downloaded_piece_hash != piece.hash[0..20] {
+            bail!(
+                "hash not matching of downloaded piece have: {} want: {}",
+                hash_to_hex(&downloaded_piece_hash),
+                hash_to_hex(&piece.hash)
+            )
+        }
+
+        Ok(piece_data)
     }
 
     pub fn perform_handshake(
@@ -439,6 +444,11 @@ impl Client {
     }
 }
 
+// TODO: need to consolidate that into a type or so.
+fn hash_to_hex(hash: &[u8]) -> String {
+    hash.iter().map(|byte| format!("{:02x}", byte)).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -452,6 +462,14 @@ mod tests {
         assert_eq!(response.interval, 60);
         let has_data = response.peers.len() > 0;
         assert_eq!(true, has_data);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_peer_message_from_bytes() -> Result<(), Box<dyn std::error::Error>> {
+        // PeerMessage::from_bytes(&[0, 0, 0, 2, 5])?;
+        PeerMessage::from_bytes(&[5, 224])?;
 
         Ok(())
     }
