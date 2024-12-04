@@ -18,9 +18,7 @@ const ID_SIZE: usize = 20;
 const PEER_BYTE_SIZE: usize = 6;
 const HANDSHAKE_BYTE_SIZE: usize = 68;
 const BLOCK_SIZE: usize = 16 * 1024;
-const INDEX_SIZE: usize = 32;
-const BEGIN_SIZE: usize = 32;
-const PIECE_BUF_SIZE: usize = BEGIN_SIZE + INDEX_SIZE + BLOCK_SIZE;
+const MAX_PAYLOAD_LEN: u32 = 1048576;
 
 struct QueryParams<'a> {
     info_hash: &'a str,
@@ -180,27 +178,64 @@ impl Handshake {
     }
 }
 
+struct PeerMessageReader {
+    meta_buf: [u8; 5],
+}
+
+impl PeerMessageReader {
+    fn new() -> Self {
+        Self { meta_buf: [0; 5] }
+    }
+    fn ident_byte(&self) -> u8 {
+        self.meta_buf[4]
+    }
+
+    fn payload_len(&self) -> u32 {
+        u32::from_be_bytes(
+            self.meta_buf[0..4]
+                .try_into()
+                .expect("[u8; 5] into [u8; 4] will always work"),
+        )
+    }
+
+    fn from_stream(&mut self, s: &mut TcpStream) -> Result<PeerMessage> {
+        s.read_exact(&mut self.meta_buf)?;
+        let payload_len = self.payload_len();
+        if payload_len > MAX_PAYLOAD_LEN {
+            bail!(
+                "message specifies too large payload length: allowed {} bytes wants {} bytes",
+                MAX_PAYLOAD_LEN,
+                payload_len
+            )
+        }
+        let payload_buf = vec![0; self.payload_len() as usize];
+        let pm = PeerMessage::from_bytes(self.ident_byte(), &payload_buf)?;
+
+        Ok(pm)
+    }
+}
+
 #[derive(Debug)]
 enum PeerMessage {
     Bitfield,
     Interested,
     Unchoke,
-    Request(RequestMessage),
-    Piece(PieceMessage),
+    Request(RequestPayload),
+    Piece(PiecePayload),
 }
 
 impl PeerMessage {
-    fn from_bytes(bytes: &[u8]) -> Result<PeerMessage> {
-        match bytes.first().ok_or(anyhow!("empty bytes given"))? {
+    fn from_bytes(ident: u8, payload: &[u8]) -> Result<PeerMessage> {
+        match ident {
             1 => Ok(Self::Unchoke),
             2 => Ok(Self::Interested),
             5 => Ok(Self::Bitfield),
             6 => {
-                let msg = RequestMessage::from_bytes(bytes)?;
+                let msg = RequestPayload::from_bytes(payload)?;
                 Ok(Self::Request(msg))
             }
             7 => {
-                let msg = PieceMessage::from_bytes(bytes)?;
+                let msg = PiecePayload::from_bytes(payload)?;
                 Ok(Self::Piece(msg))
             }
             other => bail!("unknown byte message id: {}", other),
@@ -219,31 +254,68 @@ impl PeerMessage {
 }
 
 #[derive(Debug)]
-struct PieceMessage {
+struct PiecePayload {
     index: u32,
     begin: u32,
     block: [u8; BLOCK_SIZE],
 }
 
-impl PieceMessage {
+impl PiecePayload {
     fn to_bytes(&self) -> &[u8] {
         unimplemented!()
     }
 
-    fn from_bytes(b: &[u8]) -> Result<PieceMessage> {
+    fn from_bytes(b: &[u8]) -> Result<PiecePayload> {
         unimplemented!()
     }
 }
 
+struct RequestPayloadGen {
+    piece_len: usize,
+    piece_idx: usize,
+    progress: usize,
+}
+
+impl RequestPayloadGen {
+    fn new(piece_len: usize, piece_idx: usize) -> Self {
+        Self {
+            piece_len,
+            piece_idx,
+            progress: 0,
+        }
+    }
+
+    fn next(&mut self) -> Option<RequestPayload> {
+        if self.progress >= self.piece_len {
+            return None;
+        }
+
+        let next_progress = self.progress + BLOCK_SIZE;
+        let len = if next_progress <= self.piece_len {
+            BLOCK_SIZE
+        } else {
+            self.piece_len - (next_progress - BLOCK_SIZE)
+        };
+
+        let rp = RequestPayload {
+            index: self.piece_idx,
+            begin: self.progress,
+            length: len,
+        };
+        self.progress = next_progress;
+        Some(rp)
+    }
+}
+
 #[derive(Debug)]
-struct RequestMessage {
+struct RequestPayload {
     index: usize,
     begin: usize,
     length: usize,
 }
 
-impl RequestMessage {
-    fn from_bytes(bytes: &[u8]) -> Result<RequestMessage> {
+impl RequestPayload {
+    fn from_bytes(bytes: &[u8]) -> Result<RequestPayload> {
         unimplemented!()
     }
 
@@ -276,28 +348,21 @@ impl Client {
     ) -> Result<Vec<u8>> {
         let mut stream = TcpStream::connect(peer.to_string())?;
         self.handshake(req.info_hash, &mut stream)?;
-        let mut len_buf: [u8; 4] = [0; 4];
+        let mut reader = PeerMessageReader::new();
 
-        // TODO: Read len AND id into buffer and then assign payload buffer.
-
-        // Bitfield
-        stream.read_exact(&mut len_buf)?;
-        let next_buf_size = u32::from_be_bytes(len_buf);
-        if next_buf_size == 0 {
-            bail!("got 0 size message - Bitfield")
-        }
-        let mut bitfield_buf = vec![0; next_buf_size as usize];
-        stream.read_exact(&mut bitfield_buf)?;
-        match PeerMessage::from_bytes(&bitfield_buf)? {
+        // Read Bitfield
+        let mut msg = reader.from_stream(&mut stream)?;
+        match msg {
             PeerMessage::Bitfield => {}
             other => bail!("expected Bitfield PeerMessage, got {:?}", other),
         }
 
+        // Send Interested
         stream.write_all(PeerMessage::Interested.to_bytes())?;
 
-        let mut unchoke_buf: [u8; 5] = [0; 5];
-        stream.read_exact(&mut unchoke_buf)?;
-        match PeerMessage::from_bytes(&unchoke_buf)? {
+        // Read Unchoke
+        msg = reader.from_stream(&mut stream)?;
+        match msg {
             PeerMessage::Unchoke => {}
             other => bail!("expected Unchoke PeerMessage, got {:?}", other),
         }
@@ -307,42 +372,18 @@ impl Client {
             .get(piece_idx)
             .ok_or(anyhow!("no piece at index {}", piece_idx))?;
 
-        let mut block_counter = 0;
-        let mut offset = 0;
-        let mut iter_cnt = 0;
-        let mut piece_buf: [u8; PIECE_BUF_SIZE] = [0; PIECE_BUF_SIZE];
         let mut piece_data: Vec<u8> = Vec::new();
-        let mut breaker = false;
-        loop {
-            block_counter += BLOCK_SIZE;
-            let len = if block_counter < req.piece_length {
-                BLOCK_SIZE
-            } else {
-                breaker = true;
-                req.piece_length - (block_counter - BLOCK_SIZE)
-            };
-
-            let req = RequestMessage {
-                index: piece_idx,
-                begin: offset,
-                length: len,
-            };
+        let mut req_gen = RequestPayloadGen::new(req.piece_length, piece_idx);
+        while let Some(req) = req_gen.next() {
             let payload = req.to_bytes();
             stream.write_all(payload)?;
 
-            stream.read_exact(&mut piece_buf)?;
-            let piece_msg = match PeerMessage::from_bytes(&piece_buf)? {
+            msg = reader.from_stream(&mut stream)?;
+            let piece_msg = match msg {
                 PeerMessage::Piece(piece) => piece,
                 other => bail!("expected Piece PeerMessage, got {:?}", other),
             };
             piece_data.append(&mut piece_msg.block.to_vec());
-
-            if breaker {
-                break;
-            }
-
-            iter_cnt += 1;
-            offset = iter_cnt * BLOCK_SIZE;
         }
 
         let mut hasher = Sha1::new();
@@ -462,14 +503,6 @@ mod tests {
         assert_eq!(response.interval, 60);
         let has_data = response.peers.len() > 0;
         assert_eq!(true, has_data);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_peer_message_from_bytes() -> Result<(), Box<dyn std::error::Error>> {
-        // PeerMessage::from_bytes(&[0, 0, 0, 2, 5])?;
-        PeerMessage::from_bytes(&[5, 224])?;
 
         Ok(())
     }
