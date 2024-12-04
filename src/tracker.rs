@@ -19,6 +19,21 @@ const PEER_BYTE_SIZE: usize = 6;
 const HANDSHAKE_BYTE_SIZE: usize = 68;
 const BLOCK_SIZE: usize = 16 * 1024;
 const MAX_PAYLOAD_LEN: u32 = 1048576;
+const PAYLOAD_SIZE_BYTES: u32 = 16;
+
+const LENGTH_PREFIX_SIZE_BYTES: usize = 4;
+const ID_SIZE_BYTES: usize = 1;
+
+const INDEX_SIZE_BYTES: usize = 4;
+const BEGIN_SIZE_BYTES: usize = 4;
+const LENGTH_SIZE_BYTES: usize = 4;
+
+const REQUEST_MESSAGE_LENGTH_BYTES: usize =
+    ID_SIZE_BYTES + INDEX_SIZE_BYTES + BEGIN_SIZE_BYTES + LENGTH_SIZE_BYTES;
+
+const REQUEST_PAYLOAD_BYTES_COUNT: usize = INDEX_SIZE_BYTES + BEGIN_SIZE_BYTES + LENGTH_SIZE_BYTES;
+const REQUEST_BYTES_COUNT: usize =
+    LENGTH_PREFIX_SIZE_BYTES + ID_SIZE_BYTES + REQUEST_PAYLOAD_BYTES_COUNT;
 
 struct QueryParams<'a> {
     info_hash: &'a str,
@@ -200,15 +215,16 @@ impl PeerMessageReader {
 
     fn from_stream(&mut self, s: &mut TcpStream) -> Result<PeerMessage> {
         s.read_exact(&mut self.meta_buf)?;
-        let payload_len = self.payload_len();
+        let mut payload_len = self.payload_len();
+        dbg!(payload_len);
         if payload_len > MAX_PAYLOAD_LEN {
-            bail!(
+            println!(
                 "message specifies too large payload length: allowed {} bytes wants {} bytes",
-                MAX_PAYLOAD_LEN,
-                payload_len
-            )
+                MAX_PAYLOAD_LEN, payload_len
+            );
+            payload_len = MAX_PAYLOAD_LEN;
         }
-        let payload_buf = vec![0; self.payload_len() as usize];
+        let payload_buf = vec![0; payload_len as usize];
         let pm = PeerMessage::from_bytes(self.ident_byte(), &payload_buf)?;
 
         Ok(pm)
@@ -242,13 +258,21 @@ impl PeerMessage {
         }
     }
 
-    fn to_bytes(&self) -> &[u8] {
+    fn to_bytes(&self) -> Vec<u8> {
         match self {
-            PeerMessage::Unchoke => &[1],
-            PeerMessage::Interested => &[0, 0, 0, 1, 2],
-            PeerMessage::Bitfield => &[5],
-            PeerMessage::Request(msg) => msg.to_bytes(),
-            PeerMessage::Piece(msg) => msg.to_bytes(),
+            PeerMessage::Unchoke => vec![0, 0, 0, 1, 1],
+            PeerMessage::Interested => vec![0, 0, 0, 1, 2],
+            PeerMessage::Bitfield => vec![0, 0, 0, 1, 5],
+            PeerMessage::Request(msg) => {
+                let mut out: Vec<u8> = Vec::with_capacity(REQUEST_BYTES_COUNT);
+                let msg_len = REQUEST_MESSAGE_LENGTH_BYTES as u32;
+                out.extend_from_slice(&msg_len.to_be_bytes());
+                let id = 6 as u32;
+                out.extend_from_slice(&id.to_be_bytes());
+                msg.append_bytes(&mut out);
+                out
+            }
+            PeerMessage::Piece(msg) => msg.to_bytes().to_vec(),
         }
     }
 }
@@ -266,18 +290,25 @@ impl PiecePayload {
     }
 
     fn from_bytes(b: &[u8]) -> Result<PiecePayload> {
-        unimplemented!()
+        let index = u32::from_be_bytes(b[..4].try_into()?);
+        let begin = u32::from_be_bytes(b[4..8].try_into()?);
+        let block: [u8; BLOCK_SIZE] = b[8..BLOCK_SIZE].try_into()?;
+        Ok(PiecePayload {
+            index,
+            begin,
+            block,
+        })
     }
 }
 
 struct RequestPayloadGen {
-    piece_len: usize,
-    piece_idx: usize,
-    progress: usize,
+    piece_len: u32,
+    piece_idx: u32,
+    progress: u32,
 }
 
 impl RequestPayloadGen {
-    fn new(piece_len: usize, piece_idx: usize) -> Self {
+    fn new(piece_len: u32, piece_idx: u32) -> Self {
         Self {
             piece_len,
             piece_idx,
@@ -290,11 +321,11 @@ impl RequestPayloadGen {
             return None;
         }
 
-        let next_progress = self.progress + BLOCK_SIZE;
+        let next_progress = self.progress + BLOCK_SIZE as u32;
         let len = if next_progress <= self.piece_len {
-            BLOCK_SIZE
+            BLOCK_SIZE as u32
         } else {
-            self.piece_len - (next_progress - BLOCK_SIZE)
+            self.piece_len - (next_progress - BLOCK_SIZE as u32)
         };
 
         let rp = RequestPayload {
@@ -309,18 +340,36 @@ impl RequestPayloadGen {
 
 #[derive(Debug)]
 struct RequestPayload {
-    index: usize,
-    begin: usize,
-    length: usize,
+    index: u32,
+    begin: u32,
+    length: u32,
 }
 
 impl RequestPayload {
     fn from_bytes(bytes: &[u8]) -> Result<RequestPayload> {
-        unimplemented!()
+        bail!("unexpected RequestPayload in PeerMessage, from_bytes is not implemented")
     }
 
-    fn to_bytes(&self) -> &[u8] {
-        unimplemented!()
+    fn append_bytes(&self, to: &mut Vec<u8>) {
+        to.extend_from_slice(&self.index.to_be_bytes());
+        to.extend_from_slice(&self.begin.to_be_bytes());
+        to.extend_from_slice(&self.length.to_be_bytes());
+    }
+
+    fn to_bytes_old(&self) -> [u8; REQUEST_PAYLOAD_BYTES_COUNT] {
+        let mut out = [0u8; REQUEST_PAYLOAD_BYTES_COUNT];
+        out[..4].copy_from_slice(&self.index.to_be_bytes());
+        out[4..8].copy_from_slice(&self.begin.to_be_bytes());
+        out[8..12].copy_from_slice(&self.length.to_be_bytes());
+        out
+    }
+
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(REQUEST_PAYLOAD_BYTES_COUNT);
+        out.extend_from_slice(&self.index.to_be_bytes());
+        out.extend_from_slice(&self.begin.to_be_bytes());
+        out.extend_from_slice(&self.length.to_be_bytes());
+        out
     }
 }
 
@@ -343,11 +392,11 @@ impl Client {
     pub fn download_piece(
         &self,
         peer: &Peer,
-        req: torrent::DownloadRequest,
+        download_req: torrent::DownloadRequest,
         piece_idx: usize,
     ) -> Result<Vec<u8>> {
         let mut stream = TcpStream::connect(peer.to_string())?;
-        self.handshake(req.info_hash, &mut stream)?;
+        self.handshake(download_req.info_hash, &mut stream)?;
         let mut reader = PeerMessageReader::new();
 
         // Read Bitfield
@@ -358,7 +407,7 @@ impl Client {
         }
 
         // Send Interested
-        stream.write_all(PeerMessage::Interested.to_bytes())?;
+        stream.write_all(&PeerMessage::Interested.to_bytes())?;
 
         // Read Unchoke
         msg = reader.from_stream(&mut stream)?;
@@ -367,16 +416,20 @@ impl Client {
             other => bail!("expected Unchoke PeerMessage, got {:?}", other),
         }
 
-        let piece = req
+        let piece = download_req
             .pieces
             .get(piece_idx)
             .ok_or(anyhow!("no piece at index {}", piece_idx))?;
 
-        let mut piece_data: Vec<u8> = Vec::new();
-        let mut req_gen = RequestPayloadGen::new(req.piece_length, piece_idx);
+        // Download Piece by requesting blocks of data until all data is read.
+        let mut piece_data: Vec<u8> = Vec::with_capacity(download_req.piece_length);
+        let mut req_gen =
+        // TODO: piece_length might be u32 always, same with piece_idx.
+            RequestPayloadGen::new(download_req.piece_length as u32, piece_idx as u32);
         while let Some(req) = req_gen.next() {
-            let payload = req.to_bytes();
-            stream.write_all(payload)?;
+            let peer_msg = PeerMessage::Request(req);
+            let payload = peer_msg.to_bytes();
+            stream.write_all(&payload)?;
 
             msg = reader.from_stream(&mut stream)?;
             let piece_msg = match msg {
@@ -386,10 +439,10 @@ impl Client {
             piece_data.append(&mut piece_msg.block.to_vec());
         }
 
+        // Checksums with sha1.
         let mut hasher = Sha1::new();
         hasher.update(&piece_data);
         let downloaded_piece_hash: [u8; 20] = hasher.finalize().into();
-
         if downloaded_piece_hash != piece.hash[0..20] {
             bail!(
                 "hash not matching of downloaded piece have: {} want: {}",
@@ -504,6 +557,23 @@ mod tests {
         let has_data = response.peers.len() > 0;
         assert_eq!(true, has_data);
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_request_payload_gen_next() -> Result<(), Box<dyn std::error::Error>> {
+        let piece_len = 32768 as usize;
+        let mut gen = RequestPayloadGen::new(piece_len as u32, 0);
+        let counts = 2; // BLOCK_SIZE * 2 == piece_len
+        let mut cnt = 0;
+        for _n in 0..counts {
+            let is_some = gen.next().is_some();
+            cnt += 1;
+            assert_eq!(is_some, true)
+        }
+
+        assert_eq!(gen.next().is_some(), false);
+        assert_eq!(cnt, 2);
         Ok(())
     }
 }
