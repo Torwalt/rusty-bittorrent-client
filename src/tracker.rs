@@ -21,18 +21,18 @@ const BLOCK_SIZE: u32 = 16 * 1024;
 const MAX_PAYLOAD_LEN: u32 = 1048576;
 const PAYLOAD_SIZE_BYTES: u32 = 16;
 
-const LENGTH_PREFIX_SIZE_BYTES: usize = 4;
-const ID_SIZE_BYTES: usize = 1;
+const LENGTH_PREFIX_SIZE_BYTES: u32 = 4;
+const ID_SIZE_BYTES: u32 = 1;
 
-const INDEX_SIZE_BYTES: usize = 4;
-const BEGIN_SIZE_BYTES: usize = 4;
-const LENGTH_SIZE_BYTES: usize = 4;
+const INDEX_SIZE_BYTES: u32 = 4;
+const BEGIN_SIZE_BYTES: u32 = 4;
+const LENGTH_SIZE_BYTES: u32 = 4;
 
-const REQUEST_MESSAGE_LENGTH_BYTES: usize =
+const REQUEST_MESSAGE_LENGTH_BYTES: u32 =
     ID_SIZE_BYTES + INDEX_SIZE_BYTES + BEGIN_SIZE_BYTES + LENGTH_SIZE_BYTES;
 
-const REQUEST_PAYLOAD_BYTES_COUNT: usize = INDEX_SIZE_BYTES + BEGIN_SIZE_BYTES + LENGTH_SIZE_BYTES;
-const REQUEST_BYTES_COUNT: usize =
+const REQUEST_PAYLOAD_BYTES_COUNT: u32 = INDEX_SIZE_BYTES + BEGIN_SIZE_BYTES + LENGTH_SIZE_BYTES;
+const REQUEST_BYTES_COUNT: u32 =
     LENGTH_PREFIX_SIZE_BYTES + ID_SIZE_BYTES + REQUEST_PAYLOAD_BYTES_COUNT;
 
 struct QueryParams<'a> {
@@ -271,11 +271,9 @@ impl PeerMessage {
             PeerMessage::Interested => vec![0, 0, 0, 1, 2],
             PeerMessage::Bitfield => vec![0, 0, 0, 1, 5],
             PeerMessage::Request(msg) => {
-                let mut out: Vec<u8> = Vec::with_capacity(REQUEST_BYTES_COUNT);
-                let msg_len = REQUEST_MESSAGE_LENGTH_BYTES as u32;
-                out.extend_from_slice(&msg_len.to_be_bytes());
-                let id = 6 as u32;
-                out.extend_from_slice(&id.to_be_bytes());
+                let mut out: Vec<u8> = Vec::with_capacity(REQUEST_BYTES_COUNT as usize);
+                out.extend_from_slice(&REQUEST_MESSAGE_LENGTH_BYTES.to_be_bytes());
+                out.extend_from_slice(&6u8.to_be_bytes());
                 msg.append_bytes(&mut out);
                 out
             }
