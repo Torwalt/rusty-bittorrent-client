@@ -297,7 +297,7 @@ impl PiecePayload {
     fn from_bytes(b: &[u8]) -> Result<PiecePayload> {
         let index = u32::from_be_bytes(b[..4].try_into()?);
         let begin = u32::from_be_bytes(b[4..8].try_into()?);
-        let block: [u8; BLOCK_SIZE as usize] = b[8..BLOCK_SIZE as usize].try_into()?;
+        let block: [u8; BLOCK_SIZE as usize] = b[8..8 + BLOCK_SIZE as usize].try_into()?;
         Ok(PiecePayload {
             index,
             begin,
@@ -571,6 +571,19 @@ mod tests {
 
         assert_eq!(gen.next().is_some(), false);
         assert_eq!(cnt, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn test_piece_payload_from_bytes() -> Result<(), Box<dyn std::error::Error>> {
+        let mut piece_bytes: Vec<u8> = Vec::new();
+        piece_bytes.extend_from_slice(&0u32.to_be_bytes());
+        piece_bytes.extend_from_slice(&0u32.to_be_bytes());
+        let random_data: Vec<u8> = (0..16384).map(|_| rand::random::<u8>()).collect();
+        piece_bytes.extend_from_slice(&random_data);
+
+        PiecePayload::from_bytes(&piece_bytes)?;
+
         Ok(())
     }
 }

@@ -90,7 +90,10 @@ fn main() -> Result<()> {
                 .ok_or(anyhow!("no peers found in torrent file"))?;
             let download_req = torrent.to_download_request();
             let piece_data = client.download_piece(peer, download_req, piece_index.clone())?;
-            let mut file = fs::OpenOptions::new().write(true).open(output_path)?;
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .open(output_path)?;
             file.write_all(&piece_data)?;
         }
         None => {}
