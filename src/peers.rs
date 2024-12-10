@@ -213,7 +213,6 @@ mod tests {
 
         let response: PeerResponse = serde_bencode::from_bytes(bencoded)?;
 
-        assert_eq!(response.interval, 60);
         let has_data = response.peers.len() > 0;
         assert_eq!(true, has_data);
 

@@ -46,16 +46,16 @@ impl TorrentFile {
 
 pub struct PeerRequest<'a> {
     pub url: Url,
-    pub info_hash: &'a InfoHash,
+    pub info_hash: &'a Hash,
     pub length: usize,
 }
 
 pub struct DownloadRequest<'a> {
     pub length: usize,
     pub piece_length: usize,
-    pub pieces: &'a [PieceHash],
+    pub pieces: &'a [Hash],
     // TODO: Should be static.
-    pub info_hash: &'a InfoHash,
+    pub info_hash: &'a Hash,
 }
 
 pub struct Torrent {
@@ -100,33 +100,11 @@ impl Torrent {
     }
 }
 
-pub struct InfoHash([u8; 20]);
-
-impl Clone for InfoHash {
-    fn clone(&self) -> InfoHash {
-        InfoHash(self.0.clone())
-    }
-}
-
-impl InfoHash {
-    pub fn new(hash: [u8; 20]) -> InfoHash {
-        InfoHash(hash)
-    }
-
-    pub fn get_hash(&self) -> &[u8; 20] {
-        return &self.0;
-    }
-
-    pub fn to_hex(&self) -> String {
-        hash_to_hex(&self.0.to_vec())
-    }
-}
-
 struct Info {
     length: usize,
     piece_length: usize,
-    pieces: Vec<PieceHash>,
-    hash: InfoHash,
+    pieces: Vec<Hash>,
+    hash: Hash,
 }
 
 impl fmt::Display for Info {
@@ -145,11 +123,15 @@ impl fmt::Display for Info {
 
 impl Info {
     fn from_file_info(fi: &FileInfo) -> Result<Info> {
-        let mut pieces: Vec<PieceHash> = Vec::new();
+        let mut pieces: Vec<Hash> = Vec::new();
         let chunks = fi.pieces.chunks(20);
 
         for chunk in chunks {
-            pieces.push(PieceHash::new(chunk.to_vec()))
+            pieces.push(Hash::new(
+                chunk
+                    .try_into()
+                    .context("expected to cast chunk of 20 into array of 20")?,
+            ))
         }
 
         let hash = Self::hash(fi)?;
@@ -158,56 +140,56 @@ impl Info {
             length: fi.length,
             piece_length: fi.piece_length,
             pieces,
-            hash: InfoHash(hash),
+            hash,
         })
     }
 
-    fn hash(fi: &FileInfo) -> Result<[u8; 20]> {
+    fn hash(fi: &FileInfo) -> Result<Hash> {
         let info_encoded = serde_bencode::to_bytes(fi).context("could not bencode info")?;
 
-        Ok(hash(&info_encoded))
+        Ok(Hash::hash(&info_encoded))
     }
 }
 
-pub struct PieceHash(Vec<u8>);
+pub struct Hash([u8; 20]);
 
-impl PartialEq for PieceHash {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
+impl Clone for Hash {
+    fn clone(&self) -> Hash {
+        Hash(self.0.clone())
     }
 }
 
-impl fmt::Display for PieceHash {
+impl fmt::Display for Hash {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "{}", self.to_hex())
     }
 }
 
-impl PieceHash {
-    pub fn new(hash: Vec<u8>) -> PieceHash {
-        // TODO: invariants
-        PieceHash(hash)
+impl PartialEq for Hash {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl Hash {
+    pub fn new(hash: [u8; 20]) -> Hash {
+        Hash(hash)
     }
 
-    pub fn hash(data: &Vec<u8>) -> PieceHash {
-        PieceHash(hash(data).to_vec())
+    pub fn get_hash(&self) -> &[u8; 20] {
+        &self.0
+    }
+
+    pub fn hash(data: &Vec<u8>) -> Hash {
+        let mut hasher = Sha1::new();
+        hasher.update(data);
+        let res = hasher.finalize();
+        Hash(res.into())
     }
 
     pub fn to_hex(&self) -> String {
-        hash_to_hex(&self.0)
+        self.0.iter().map(|byte| format!("{:02x}", byte)).collect()
     }
-}
-
-fn hash_to_hex(hash: &Vec<u8>) -> String {
-    hash.iter().map(|byte| format!("{:02x}", byte)).collect()
-}
-
-fn hash(data: &Vec<u8>) -> [u8; 20] {
-    let mut hasher = Sha1::new();
-    hasher.update(data);
-    let res = hasher.finalize();
-
-    res.into()
 }
 
 #[cfg(test)]
