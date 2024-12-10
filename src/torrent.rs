@@ -53,7 +53,7 @@ pub struct PeerRequest<'a> {
 pub struct DownloadRequest<'a> {
     pub length: usize,
     pub piece_length: usize,
-    pub pieces: &'a [Piece],
+    pub pieces: &'a [PieceHash],
     // TODO: Should be static.
     pub info_hash: &'a InfoHash,
 }
@@ -102,17 +102,23 @@ impl Torrent {
 
 pub struct InfoHash(pub [u8; 20]);
 
+impl InfoHash {
+    pub fn to_hex(&self) -> String {
+        hash_to_hex(&self.0.to_vec())
+    }
+}
+
 struct Info {
     length: usize,
     piece_length: usize,
-    pieces: Vec<Piece>,
+    pieces: Vec<PieceHash>,
     hash: InfoHash,
 }
 
 impl fmt::Display for Info {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "Length: {}", self.length)?;
-        writeln!(f, "Info Hash {}", hash_to_hex(&self.hash.0))?;
+        writeln!(f, "Info Hash {}", self.hash.to_hex())?;
         writeln!(f, "Piece Length: {}", self.piece_length)?;
         writeln!(f, "Piece Hashes")?;
         for p in &self.pieces {
@@ -125,13 +131,11 @@ impl fmt::Display for Info {
 
 impl Info {
     fn from_file_info(fi: &FileInfo) -> Result<Info> {
-        let mut pieces: Vec<Piece> = Vec::new();
+        let mut pieces: Vec<PieceHash> = Vec::new();
         let chunks = fi.pieces.chunks(20);
 
         for chunk in chunks {
-            pieces.push(Piece {
-                hash: chunk.to_vec(),
-            })
+            pieces.push(PieceHash::new(chunk.to_vec()))
         }
 
         let hash = Self::hash(fi)?;
@@ -155,17 +159,41 @@ impl Info {
     }
 }
 
-pub struct Piece {
-    pub hash: Vec<u8>,
-}
+pub struct PieceHash(Vec<u8>);
 
-impl fmt::Display for Piece {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "{}", hash_to_hex(&self.hash))
+impl PartialEq for PieceHash {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
     }
 }
 
-fn hash_to_hex(hash: &[u8]) -> String {
+impl fmt::Display for PieceHash {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "{}", self.to_hex())
+    }
+}
+
+impl PieceHash {
+    pub fn new(hash: Vec<u8>) -> PieceHash {
+        // TODO: invariants
+        PieceHash(hash)
+    }
+
+    pub fn hash(data: &Vec<u8>) -> Result<PieceHash> {
+        let mut hasher = Sha1::new();
+        hasher.update(data);
+        let res = hasher.finalize();
+
+        let hashed: [u8; 20] = res.into();
+        Ok(PieceHash::new(hashed.to_vec()))
+    }
+
+    pub fn to_hex(&self) -> String {
+        hash_to_hex(&self.0)
+    }
+}
+
+fn hash_to_hex(hash: &Vec<u8>) -> String {
     hash.iter().map(|byte| format!("{:02x}", byte)).collect()
 }
 

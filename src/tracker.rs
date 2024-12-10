@@ -3,10 +3,9 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 
 use anyhow::{anyhow, bail, Context, Result};
-use sha1::{Digest, Sha1};
 
 use crate::peers::{Peer, PeerID};
-use crate::torrent;
+use crate::torrent::{self, PieceHash};
 
 const HANDSHAKE_BYTE_SIZE: usize = 68;
 // PORT is for now just hardcoded.
@@ -186,9 +185,7 @@ impl PiecePayload {
         let _ = u32::from_be_bytes(b[..4].try_into()?);
         let _ = u32::from_be_bytes(b[4..8].try_into()?);
         let block: [u8; BLOCK_SIZE as usize] = b[8..8 + BLOCK_SIZE as usize].try_into()?;
-        Ok(PiecePayload {
-            block,
-        })
+        Ok(PiecePayload { block })
     }
 }
 
@@ -317,14 +314,12 @@ impl Client {
         }
 
         // Checksums with sha1.
-        let mut hasher = Sha1::new();
-        hasher.update(&piece_data);
-        let downloaded_piece_hash: [u8; 20] = hasher.finalize().into();
-        if downloaded_piece_hash != piece.hash[0..20] {
+        let downloaded_piece_hash = &PieceHash::hash(&piece_data)?;
+        if downloaded_piece_hash != piece {
             bail!(
                 "hash not matching of downloaded piece have: {} want: {}",
-                hash_to_hex(&downloaded_piece_hash),
-                hash_to_hex(&piece.hash)
+                downloaded_piece_hash.to_hex(),
+                piece.to_hex()
             )
         }
 
@@ -362,11 +357,6 @@ impl Client {
 
         Handshake::from_bytes(buf)
     }
-}
-
-// TODO: need to consolidate that into a type or so.
-fn hash_to_hex(hash: &[u8]) -> String {
-    hash.iter().map(|byte| format!("{:02x}", byte)).collect()
 }
 
 #[cfg(test)]
