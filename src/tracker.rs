@@ -5,7 +5,7 @@ use std::net::TcpStream;
 use anyhow::{anyhow, bail, Context, Result};
 
 use crate::peers::{Peer, PeerID};
-use crate::torrent::{self, PieceHash};
+use crate::torrent::{self, InfoHash, PieceHash};
 
 const HANDSHAKE_BYTE_SIZE: usize = 68;
 // PORT is for now just hardcoded.
@@ -27,7 +27,7 @@ const REQUEST_BYTES_COUNT: u32 =
     LENGTH_PREFIX_SIZE_BYTES + ID_SIZE_BYTES + REQUEST_PAYLOAD_BYTES_COUNT;
 
 pub struct Handshake {
-    info_hash: torrent::InfoHash,
+    info_hash: InfoHash,
     peer_id: Vec<u8>,
 }
 
@@ -43,9 +43,9 @@ impl fmt::Display for Handshake {
 }
 
 impl Handshake {
-    fn new(info_hash: &torrent::InfoHash, peer_id: &PeerID) -> Handshake {
+    fn new(info_hash: &InfoHash, peer_id: &PeerID) -> Handshake {
         Handshake {
-            info_hash: torrent::InfoHash(info_hash.0.to_owned()),
+            info_hash: info_hash.clone(),
             peer_id: peer_id.as_bytes().to_vec(),
         }
     }
@@ -66,7 +66,7 @@ impl Handshake {
         out[0] = PROTOCOL_LEN;
         out[1..20].copy_from_slice(&PROTOCOL.as_bytes());
         // out[20..28] -> Reserved
-        out[28..48].copy_from_slice(&self.info_hash.0);
+        out[28..48].copy_from_slice(self.info_hash.get_hash());
         out[48..68].copy_from_slice(&self.peer_id);
 
         out
@@ -78,7 +78,7 @@ impl Handshake {
             .context("when converting to info_hash")?;
 
         Ok(Handshake {
-            info_hash: torrent::InfoHash(info_hash),
+            info_hash: InfoHash::new(info_hash),
             peer_id: data[48..68].to_vec(),
         })
     }
@@ -314,7 +314,7 @@ impl Client {
         }
 
         // Checksums with sha1.
-        let downloaded_piece_hash = &PieceHash::hash(&piece_data)?;
+        let downloaded_piece_hash = &PieceHash::hash(&piece_data);
         if downloaded_piece_hash != piece {
             bail!(
                 "hash not matching of downloaded piece have: {} want: {}",
@@ -326,20 +326,12 @@ impl Client {
         Ok(piece_data)
     }
 
-    pub fn perform_handshake(
-        &self,
-        peer: &Peer,
-        info_hash: &torrent::InfoHash,
-    ) -> Result<Handshake> {
+    pub fn perform_handshake(&self, peer: &Peer, info_hash: &InfoHash) -> Result<Handshake> {
         let mut stream = TcpStream::connect(peer.to_string())?;
         self.handshake(info_hash, &mut stream)
     }
 
-    fn handshake(
-        &self,
-        info_hash: &torrent::InfoHash,
-        stream: &mut TcpStream,
-    ) -> Result<Handshake> {
+    fn handshake(&self, info_hash: &InfoHash, stream: &mut TcpStream) -> Result<Handshake> {
         let handshake = Handshake::new(info_hash, &self.peer_id);
         let bytes = handshake.to_bytes();
 

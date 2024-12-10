@@ -152,7 +152,7 @@ impl Client {
     }
 
     pub fn find_peers(&self, req: torrent::PeerRequest) -> Result<Peers> {
-        let hash_url_encoded = urlencoding::encode_binary(&req.info_hash.0);
+        let hash_url_encoded = urlencoding::encode_binary(req.info_hash.get_hash());
 
         let query_params = QueryParams {
             info_hash: &hash_url_encoded.into_owned(),

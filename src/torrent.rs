@@ -100,9 +100,23 @@ impl Torrent {
     }
 }
 
-pub struct InfoHash(pub [u8; 20]);
+pub struct InfoHash([u8; 20]);
+
+impl Clone for InfoHash {
+    fn clone(&self) -> InfoHash {
+        InfoHash(self.0.clone())
+    }
+}
 
 impl InfoHash {
+    pub fn new(hash: [u8; 20]) -> InfoHash {
+        InfoHash(hash)
+    }
+
+    pub fn get_hash(&self) -> &[u8; 20] {
+        return &self.0;
+    }
+
     pub fn to_hex(&self) -> String {
         hash_to_hex(&self.0.to_vec())
     }
@@ -151,11 +165,7 @@ impl Info {
     fn hash(fi: &FileInfo) -> Result<[u8; 20]> {
         let info_encoded = serde_bencode::to_bytes(fi).context("could not bencode info")?;
 
-        let mut hasher = Sha1::new();
-        hasher.update(info_encoded);
-        let res = hasher.finalize();
-
-        Ok(res.into())
+        Ok(hash(&info_encoded))
     }
 }
 
@@ -179,13 +189,8 @@ impl PieceHash {
         PieceHash(hash)
     }
 
-    pub fn hash(data: &Vec<u8>) -> Result<PieceHash> {
-        let mut hasher = Sha1::new();
-        hasher.update(data);
-        let res = hasher.finalize();
-
-        let hashed: [u8; 20] = res.into();
-        Ok(PieceHash::new(hashed.to_vec()))
+    pub fn hash(data: &Vec<u8>) -> PieceHash {
+        PieceHash(hash(data).to_vec())
     }
 
     pub fn to_hex(&self) -> String {
@@ -195,6 +200,14 @@ impl PieceHash {
 
 fn hash_to_hex(hash: &Vec<u8>) -> String {
     hash.iter().map(|byte| format!("{:02x}", byte)).collect()
+}
+
+fn hash(data: &Vec<u8>) -> [u8; 20] {
+    let mut hasher = Sha1::new();
+    hasher.update(data);
+    let res = hasher.finalize();
+
+    res.into()
 }
 
 #[cfg(test)]
