@@ -130,7 +130,6 @@ impl fmt::Display for Peers {
 #[serde_as]
 #[derive(Deserialize, Debug)]
 pub struct PeerResponse {
-    interval: u64,
     #[serde_as(as = "Bytes")]
     pub peers: Vec<u8>,
 }

@@ -8,7 +8,6 @@ use sha1::{Digest, Sha1};
 use crate::peers::{Peer, PeerID};
 use crate::torrent;
 
-const ID_SIZE: usize = 20;
 const HANDSHAKE_BYTE_SIZE: usize = 68;
 // PORT is for now just hardcoded.
 const BLOCK_SIZE: u32 = 16 * 1024;
@@ -113,9 +112,7 @@ impl PeerMessageReader {
 
     fn from_stream(&mut self, s: &mut TcpStream) -> Result<PeerMessage> {
         s.read_exact(&mut self.meta_buf)?;
-        // let mut payload_len = self.payload_len();
         let payload_len = self.payload_len();
-        dbg!(payload_len);
         if payload_len > MAX_PAYLOAD_LEN {
             bail!(
                 "message specifies too large payload length: allowed {} bytes wants {} bytes",
@@ -177,8 +174,6 @@ impl PeerMessage {
 
 #[derive(Debug)]
 struct PiecePayload {
-    index: u32,
-    begin: u32,
     block: [u8; BLOCK_SIZE as usize],
 }
 
@@ -188,12 +183,10 @@ impl PiecePayload {
     }
 
     fn from_bytes(b: &[u8]) -> Result<PiecePayload> {
-        let index = u32::from_be_bytes(b[..4].try_into()?);
-        let begin = u32::from_be_bytes(b[4..8].try_into()?);
+        let _ = u32::from_be_bytes(b[..4].try_into()?);
+        let _ = u32::from_be_bytes(b[4..8].try_into()?);
         let block: [u8; BLOCK_SIZE as usize] = b[8..8 + BLOCK_SIZE as usize].try_into()?;
         Ok(PiecePayload {
-            index,
-            begin,
             block,
         })
     }

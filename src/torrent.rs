@@ -60,7 +60,6 @@ pub struct DownloadRequest<'a> {
 
 pub struct Torrent {
     tracker_url: Url,
-    created_by: String,
     info: Info,
 }
 
@@ -78,7 +77,6 @@ impl Torrent {
 
         Ok(Torrent {
             tracker_url: parsed_url,
-            created_by: tf.created_by.clone(),
             info,
         })
     }
@@ -106,7 +104,6 @@ pub struct InfoHash(pub [u8; 20]);
 
 struct Info {
     length: usize,
-    name: String,
     piece_length: usize,
     pieces: Vec<Piece>,
     hash: InfoHash,
@@ -141,7 +138,6 @@ impl Info {
 
         Ok(Info {
             length: fi.length,
-            name: fi.name.clone(),
             piece_length: fi.piece_length,
             pieces,
             hash: InfoHash(hash),
