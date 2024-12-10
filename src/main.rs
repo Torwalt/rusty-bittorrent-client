@@ -8,9 +8,9 @@ use clap::Parser;
 use torrent::TorrentFile;
 
 use self::torrent::Torrent;
-use self::tracker::Client;
 
 mod bencode;
+mod peers;
 mod torrent;
 mod tracker;
 
@@ -34,8 +34,8 @@ enum Commands {
     },
     Handshake {
         torrent_path: PathBuf,
-        #[arg(value_parser = clap::value_parser!(tracker::Peer))]
-        peer: tracker::Peer,
+        #[arg(value_parser = clap::value_parser!(peers::Peer))]
+        peer: peers::Peer,
     },
     #[command(alias = "download_piece")]
     DownloadPiece {
@@ -64,14 +64,16 @@ fn main() -> Result<()> {
         Some(Commands::Peers { torrent_path }) => {
             let torrent_file = TorrentFile::parse_from_file(torrent_path)?;
             let torrent = Torrent::from_file_torrent(&torrent_file)?;
-            let client = Client::new()?;
+            let id = peers::PeerID::new();
+            let client = peers::Client::new(id)?;
             let peers = client.find_peers(torrent.to_peer_request())?;
             println!("{}", peers)
         }
         Some(Commands::Handshake { torrent_path, peer }) => {
             let torrent_file = TorrentFile::parse_from_file(torrent_path)?;
             let torrent = Torrent::from_file_torrent(&torrent_file)?;
-            let client = Client::new()?;
+            let id = peers::PeerID::new();
+            let client = tracker::Client::new(id)?;
             let handshake = client.perform_handshake(peer, &torrent.to_peer_request().info_hash)?;
             println!("{}", handshake)
         }
@@ -82,14 +84,20 @@ fn main() -> Result<()> {
         }) => {
             let torrent_file = TorrentFile::parse_from_file(torrent_path)?;
             let torrent = Torrent::from_file_torrent(&torrent_file)?;
-            let client = Client::new()?;
-            let peers = client.find_peers(torrent.to_peer_request())?;
+            let id = peers::PeerID::new();
+
+            let peer_client = peers::Client::new(id.clone())?;
+            let tracker_client = tracker::Client::new(id.clone())?;
+
+            let peers = peer_client.find_peers(torrent.to_peer_request())?;
             let peer = peers
                 .iter()
                 .next()
                 .ok_or(anyhow!("no peers found in torrent file"))?;
+
             let download_req = torrent.to_download_request();
-            let piece_data = client.download_piece(peer, download_req, piece_index.clone())?;
+            let piece_data =
+                tracker_client.download_piece(peer, download_req, piece_index.clone())?;
             let mut file = fs::OpenOptions::new()
                 .write(true)
                 .create(true)
