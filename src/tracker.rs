@@ -3,6 +3,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 
 use anyhow::{anyhow, bail, Context, Result};
+use log::debug;
 
 use crate::peers::{Peer, PeerID};
 use crate::torrent::{self, Hash};
@@ -268,7 +269,7 @@ impl Client {
 
         let mut stream = TcpStream::connect(peer.to_string())?;
         self.handshake(download_req.info_hash, &mut stream)?;
-        println!("Performed handshake");
+        debug!("Performed Handshake");
         let mut reader = PeerMessageReader::new();
 
         // Read Bitfield
@@ -277,11 +278,11 @@ impl Client {
             PeerMessage::Bitfield => {}
             other => bail!("expected Bitfield PeerMessage, got {:?}", other),
         }
-        println!("Received Bitfield");
+        debug!("Received Bitfield");
 
         // Send Interested
         stream.write_all(&PeerMessage::Interested.to_bytes())?;
-        println!("Sent Interested");
+        debug!("Sent Interested");
 
         // Read Unchoke
         msg = reader.from_stream(&mut stream)?;
@@ -289,7 +290,7 @@ impl Client {
             PeerMessage::Unchoke => {}
             other => bail!("expected Unchoke PeerMessage, got {:?}", other),
         }
-        println!("Read Unchoke");
+        debug!("Read Unchoke");
 
         // Download Piece by requesting blocks of data until all data is read.
         let mut piece_data: Vec<u8> = Vec::with_capacity(download_req.piece_length);
@@ -297,19 +298,19 @@ impl Client {
         // TODO: piece_length might be u32 always, same with piece_idx.
             RequestPayloadGen::new(download_req.piece_length as u32, piece_idx as u32);
         while let Some(req) = req_gen.next() {
-            println!("Writing request for offset: {}", req.begin);
+            debug!("Writing request for offset: {}", req.begin);
             let peer_msg = PeerMessage::Request(req);
             let payload = peer_msg.to_bytes();
             stream.write_all(&payload)?;
-            println!("Written Request");
+            debug!("Written Request");
 
             msg = reader.from_stream(&mut stream)?;
-            println!("Read Message from stream");
+            debug!("Read Message from stream");
             let piece_msg = match msg {
                 PeerMessage::Piece(piece) => piece,
                 other => bail!("expected Piece PeerMessage, got {:?}", other),
             };
-            println!("Received Piece data.");
+            debug!("Received Piece data.");
             piece_data.append(&mut piece_msg.block.to_vec());
         }
 

@@ -50,6 +50,7 @@ enum Commands {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    env_logger::init();
 
     match &cli.command {
         Some(Commands::Decode { input }) => {
