@@ -246,6 +246,33 @@ impl RequestPayload {
     }
 }
 
+struct RequestQueue {
+    gen: RequestPayloadGen,
+    queue: [Option<RequestPayload>; 5],
+    cursor: usize,
+}
+
+impl RequestQueue {
+    fn new(mut gen: RequestPayloadGen) -> Self {
+        const ARRAY_REPEAT_VALUE: std::option::Option<RequestPayload> = None;
+        let mut q: [Option<RequestPayload>; 5] = [ARRAY_REPEAT_VALUE; 5];
+        for i in 0..4 {
+            q[i] = gen.next();
+        }
+
+        Self {
+            gen,
+            queue: q,
+            cursor: 0,
+        }
+    }
+
+    fn next(&mut self) -> Option<RequestPayload> {
+        // Hmmm, need to return and create new payload immediately or in another thread.
+        self.gen.next()
+    }
+}
+
 pub struct Client {
     // Unique, 20 char String.
     peer_id: PeerID,
@@ -380,6 +407,15 @@ mod tests {
         piece_bytes.extend_from_slice(&random_data);
 
         PiecePayload::from_bytes(&piece_bytes)?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_request_queue() -> Result<(), Box<dyn std::error::Error>> {
+        let piece_len = 32768;
+        let gen = RequestPayloadGen::new(piece_len, 0);
+        let rq = RequestQueue::new(gen);
 
         Ok(())
     }
