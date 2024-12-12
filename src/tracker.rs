@@ -210,11 +210,11 @@ impl RequestPayloadGen {
             return None;
         }
 
-        let next_progress = self.progress + BLOCK_SIZE as u32;
+        let next_progress = self.progress + BLOCK_SIZE;
         let len = if next_progress <= self.piece_len {
             BLOCK_SIZE as u32
         } else {
-            self.piece_len - (next_progress - BLOCK_SIZE as u32)
+            self.piece_len - (next_progress - BLOCK_SIZE)
         };
 
         let rp = RequestPayload {
@@ -260,11 +260,11 @@ impl Client {
         &self,
         peer: &Peer,
         download_req: torrent::DownloadRequest,
-        piece_idx: usize,
+        piece_idx: u32,
     ) -> Result<Vec<u8>> {
         let piece = download_req
             .pieces
-            .get(piece_idx)
+            .get(piece_idx as usize)
             .ok_or(anyhow!("no piece at index {}", piece_idx))?;
 
         let mut stream = TcpStream::connect(peer.to_string())?;
@@ -293,10 +293,8 @@ impl Client {
         debug!("Read Unchoke");
 
         // Download Piece by requesting blocks of data until all data is read.
-        let mut piece_data: Vec<u8> = Vec::with_capacity(download_req.piece_length);
-        let mut req_gen =
-        // TODO: piece_length might be u32 always, same with piece_idx.
-            RequestPayloadGen::new(download_req.piece_length as u32, piece_idx as u32);
+        let mut piece_data: Vec<u8> = Vec::with_capacity(download_req.piece_length as usize);
+        let mut req_gen = RequestPayloadGen::new(download_req.piece_length, piece_idx as u32);
         while let Some(req) = req_gen.next() {
             debug!("Writing request for offset: {}", req.begin);
             let peer_msg = PeerMessage::Request(req);

@@ -21,10 +21,10 @@ pub struct TorrentFile {
 #[serde_as]
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
 struct FileInfo {
-    length: usize,
+    length: u32,
     name: String,
     #[serde(rename = "piece length")]
-    piece_length: usize,
+    piece_length: u32,
     #[serde_as(as = "Bytes")]
     pieces: Vec<u8>,
 }
@@ -47,14 +47,13 @@ impl TorrentFile {
 pub struct PeerRequest<'a> {
     pub url: Url,
     pub info_hash: &'a Hash,
-    pub length: usize,
+    pub length: u32,
 }
 
 pub struct DownloadRequest<'a> {
-    pub length: usize,
-    pub piece_length: usize,
+    pub length: u32,
+    pub piece_length: u32,
     pub pieces: &'a [Hash],
-    // TODO: Should be static.
     pub info_hash: &'a Hash,
 }
 
@@ -101,8 +100,8 @@ impl Torrent {
 }
 
 struct Info {
-    length: usize,
-    piece_length: usize,
+    length: u32,
+    piece_length: u32,
     pieces: Vec<Hash>,
     hash: Hash,
 }

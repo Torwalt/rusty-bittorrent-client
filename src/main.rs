@@ -97,8 +97,11 @@ fn main() -> Result<()> {
                 .ok_or(anyhow!("no peers found in torrent file"))?;
 
             let download_req = torrent.to_download_request();
-            let piece_data =
-                tracker_client.download_piece(peer, download_req, piece_index.clone())?;
+            let piece_data = tracker_client.download_piece(
+                peer,
+                download_req,
+                piece_index.clone().try_into()?,
+            )?;
             let mut file = fs::OpenOptions::new()
                 .write(true)
                 .create(true)

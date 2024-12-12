@@ -160,7 +160,7 @@ impl Client {
             port: PORT,
             uploaded: 0,
             downloaded: 0,
-            left: req.length,
+            left: req.length as usize,
             compact: 1,
         };
 
