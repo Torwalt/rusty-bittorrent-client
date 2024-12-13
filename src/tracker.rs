@@ -1,5 +1,6 @@
 use core::fmt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::mpsc::{self, Receiver};
 
 use anyhow::{anyhow, bail, Context, Result};
 use log::debug;
@@ -248,28 +249,29 @@ impl RequestPayload {
 
 struct RequestQueue {
     gen: RequestPayloadGen,
-    queue: [Option<RequestPayload>; 5],
-    cursor: usize,
 }
 
 impl RequestQueue {
-    fn new(mut gen: RequestPayloadGen) -> Self {
-        const ARRAY_REPEAT_VALUE: std::option::Option<RequestPayload> = None;
-        let mut q: [Option<RequestPayload>; 5] = [ARRAY_REPEAT_VALUE; 5];
-        for i in 0..4 {
-            q[i] = gen.next();
-        }
-
-        Self {
-            gen,
-            queue: q,
-            cursor: 0,
-        }
+    fn new(gen: RequestPayloadGen) -> Self {
+        Self { gen }
     }
 
-    fn next(&mut self) -> Option<RequestPayload> {
-        // Hmmm, need to return and create new payload immediately or in another thread.
-        self.gen.next()
+    fn receiver(mut self) -> Receiver<Option<RequestPayload>> {
+        let (tx, rx) = mpsc::channel(5);
+        tokio::spawn(async move {
+            let mut req_cnt = 0;
+            loop {
+                let request = self.gen.next();
+                req_cnt += 1;
+                if tx.send(request).await.is_err() {
+                    debug!("Receiver channel closed, closing sender channel.");
+                    break;
+                }
+            }
+            debug!("Created {} async requests", req_cnt);
+        });
+
+        rx
     }
 }
 
@@ -296,7 +298,7 @@ impl Client {
 
         let mut stream = TcpStream::connect(peer.to_string()).await?;
         self.handshake(download_req.info_hash, &mut stream).await?;
-        debug!("Performed Handshake");
+        debug!("Performed Handshake.");
         let mut reader = PeerMessageReader::new();
 
         // Read Bitfield
@@ -305,13 +307,13 @@ impl Client {
             PeerMessage::Bitfield => {}
             other => bail!("expected Bitfield PeerMessage, got {:?}", other),
         }
-        debug!("Received Bitfield");
+        debug!("Received Bitfield.");
 
         // Send Interested
         stream
             .write_all(&PeerMessage::Interested.to_bytes())
             .await?;
-        debug!("Sent Interested");
+        debug!("Sent Interested.");
 
         // Read Unchoke
         msg = reader.from_stream(&mut stream).await?;
@@ -319,20 +321,22 @@ impl Client {
             PeerMessage::Unchoke => {}
             other => bail!("expected Unchoke PeerMessage, got {:?}", other),
         }
-        debug!("Read Unchoke");
+        debug!("Read Unchoke.");
 
         // Download Piece by requesting blocks of data until all data is read.
         let mut piece_data: Vec<u8> = Vec::with_capacity(download_req.piece_length as usize);
-        let mut req_gen = RequestPayloadGen::new(download_req.piece_length, piece_idx as u32);
-        while let Some(req) = req_gen.next() {
-            debug!("Writing request for offset: {}", req.begin);
+        let req_gen = RequestPayloadGen::new(download_req.piece_length, piece_idx as u32);
+        let req_q = RequestQueue::new(req_gen);
+        let mut rx = req_q.receiver();
+        while let Some(Some(req)) = rx.recv().await {
+            debug!("Writing request for offset: {}.", req.begin);
             let peer_msg = PeerMessage::Request(req);
             let payload = peer_msg.to_bytes();
             stream.write_all(&payload).await?;
-            debug!("Written Request");
+            debug!("Written Request.");
 
             msg = reader.from_stream(&mut stream).await?;
-            debug!("Read Message from stream");
+            debug!("Read Message from stream.");
             let piece_msg = match msg {
                 PeerMessage::Piece(piece) => piece,
                 other => bail!("expected Piece PeerMessage, got {:?}", other),
@@ -340,6 +344,8 @@ impl Client {
             debug!("Received Piece data.");
             piece_data.append(&mut piece_msg.block.to_vec());
         }
+        debug!("Closing receiver channel.");
+        rx.close();
 
         // Checksums with sha1.
         let downloaded_piece_hash = &Hash::hash(&piece_data);
@@ -409,15 +415,6 @@ mod tests {
         piece_bytes.extend_from_slice(&random_data);
 
         PiecePayload::from_bytes(&piece_bytes)?;
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_request_queue() -> Result<(), Box<dyn std::error::Error>> {
-        let piece_len = 32768;
-        let gen = RequestPayloadGen::new(piece_len, 0);
-        let rq = RequestQueue::new(gen);
 
         Ok(())
     }
