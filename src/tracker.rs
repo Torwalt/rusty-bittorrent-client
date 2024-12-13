@@ -1,9 +1,9 @@
 use core::fmt;
-use std::io::{Read, Write};
-use std::net::TcpStream;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use anyhow::{anyhow, bail, Context, Result};
 use log::debug;
+use tokio::net::TcpStream;
 
 use crate::peers::{Peer, PeerID};
 use crate::torrent::{self, Hash};
@@ -110,8 +110,8 @@ impl PeerMessageReader {
         pl
     }
 
-    fn from_stream(&mut self, s: &mut TcpStream) -> Result<PeerMessage> {
-        s.read_exact(&mut self.meta_buf)?;
+    async fn from_stream(&mut self, s: &mut TcpStream) -> Result<PeerMessage> {
+        s.read_exact(&mut self.meta_buf).await?;
         let payload_len = self.payload_len();
         if payload_len > MAX_PAYLOAD_LEN {
             bail!(
@@ -121,7 +121,7 @@ impl PeerMessageReader {
             );
         }
         let mut payload_buf = vec![0; payload_len as usize];
-        s.read_exact(&mut payload_buf)?;
+        s.read_exact(&mut payload_buf).await?;
         let pm = PeerMessage::from_bytes(self.ident_byte(), &payload_buf)?;
 
         Ok(pm)
@@ -283,10 +283,10 @@ impl Client {
         Ok(Client { peer_id: id })
     }
 
-    pub fn download_piece(
+    pub async fn download_piece(
         &self,
         peer: &Peer,
-        download_req: torrent::DownloadRequest,
+        download_req: torrent::DownloadRequest<'_>,
         piece_idx: u32,
     ) -> Result<Vec<u8>> {
         let piece = download_req
@@ -294,13 +294,13 @@ impl Client {
             .get(piece_idx as usize)
             .ok_or(anyhow!("no piece at index {}", piece_idx))?;
 
-        let mut stream = TcpStream::connect(peer.to_string())?;
-        self.handshake(download_req.info_hash, &mut stream)?;
+        let mut stream = TcpStream::connect(peer.to_string()).await?;
+        self.handshake(download_req.info_hash, &mut stream).await?;
         debug!("Performed Handshake");
         let mut reader = PeerMessageReader::new();
 
         // Read Bitfield
-        let mut msg = reader.from_stream(&mut stream)?;
+        let mut msg = reader.from_stream(&mut stream).await?;
         match msg {
             PeerMessage::Bitfield => {}
             other => bail!("expected Bitfield PeerMessage, got {:?}", other),
@@ -308,11 +308,13 @@ impl Client {
         debug!("Received Bitfield");
 
         // Send Interested
-        stream.write_all(&PeerMessage::Interested.to_bytes())?;
+        stream
+            .write_all(&PeerMessage::Interested.to_bytes())
+            .await?;
         debug!("Sent Interested");
 
         // Read Unchoke
-        msg = reader.from_stream(&mut stream)?;
+        msg = reader.from_stream(&mut stream).await?;
         match msg {
             PeerMessage::Unchoke => {}
             other => bail!("expected Unchoke PeerMessage, got {:?}", other),
@@ -326,10 +328,10 @@ impl Client {
             debug!("Writing request for offset: {}", req.begin);
             let peer_msg = PeerMessage::Request(req);
             let payload = peer_msg.to_bytes();
-            stream.write_all(&payload)?;
+            stream.write_all(&payload).await?;
             debug!("Written Request");
 
-            msg = reader.from_stream(&mut stream)?;
+            msg = reader.from_stream(&mut stream).await?;
             debug!("Read Message from stream");
             let piece_msg = match msg {
                 PeerMessage::Piece(piece) => piece,
@@ -352,21 +354,21 @@ impl Client {
         Ok(piece_data)
     }
 
-    pub fn perform_handshake(&self, peer: &Peer, info_hash: &Hash) -> Result<Handshake> {
-        let mut stream = TcpStream::connect(peer.to_string())?;
-        self.handshake(info_hash, &mut stream)
+    pub async fn perform_handshake(&self, peer: &Peer, info_hash: &Hash) -> Result<Handshake> {
+        let mut stream = TcpStream::connect(peer.to_string()).await?;
+        self.handshake(info_hash, &mut stream).await
     }
 
-    fn handshake(&self, info_hash: &Hash, stream: &mut TcpStream) -> Result<Handshake> {
+    async fn handshake(&self, info_hash: &Hash, stream: &mut TcpStream) -> Result<Handshake> {
         let handshake = Handshake::new(info_hash, &self.peer_id);
         let bytes = handshake.to_bytes();
 
-        stream.write_all(&bytes)?;
+        stream.write_all(&bytes).await?;
 
         let mut buf = [0; HANDSHAKE_BYTE_SIZE];
         let mut total_read = 0;
         while total_read < HANDSHAKE_BYTE_SIZE {
-            let bytes_read = stream.read(&mut buf[total_read..])?;
+            let bytes_read = stream.read(&mut buf[total_read..]).await?;
             if bytes_read == 0 {
                 bail!("Connection closed before handshake was fully read")
             }

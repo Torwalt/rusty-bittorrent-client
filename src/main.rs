@@ -48,7 +48,8 @@ enum Commands {
     },
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let cli = Cli::parse();
     env_logger::init();
 
@@ -67,7 +68,7 @@ fn main() -> Result<()> {
             let torrent = Torrent::from_file_torrent(&torrent_file)?;
             let id = peers::PeerID::new();
             let client = peers::Client::new(id)?;
-            let peers = client.find_peers(torrent.to_peer_request())?;
+            let peers = client.find_peers(torrent.to_peer_request()).await?;
             println!("{}", peers)
         }
         Some(Commands::Handshake { torrent_path, peer }) => {
@@ -75,7 +76,9 @@ fn main() -> Result<()> {
             let torrent = Torrent::from_file_torrent(&torrent_file)?;
             let id = peers::PeerID::new();
             let client = tracker::Client::new(id)?;
-            let handshake = client.perform_handshake(peer, &torrent.to_peer_request().info_hash)?;
+            let handshake = client
+                .perform_handshake(peer, &torrent.to_peer_request().info_hash)
+                .await?;
             println!("{}", handshake)
         }
         Some(Commands::DownloadPiece {
@@ -90,18 +93,16 @@ fn main() -> Result<()> {
             let peer_client = peers::Client::new(id.clone())?;
             let tracker_client = tracker::Client::new(id.clone())?;
 
-            let peers = peer_client.find_peers(torrent.to_peer_request())?;
+            let peers = peer_client.find_peers(torrent.to_peer_request()).await?;
             let peer = peers
                 .iter()
                 .next()
                 .ok_or(anyhow!("no peers found in torrent file"))?;
 
             let download_req = torrent.to_download_request();
-            let piece_data = tracker_client.download_piece(
-                peer,
-                download_req,
-                piece_index.clone().try_into()?,
-            )?;
+            let piece_data = tracker_client
+                .download_piece(peer, download_req, piece_index.clone().try_into()?)
+                .await?;
             let mut file = fs::OpenOptions::new()
                 .write(true)
                 .create(true)

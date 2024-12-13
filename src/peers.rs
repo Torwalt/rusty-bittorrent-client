@@ -137,12 +137,12 @@ pub struct PeerResponse {
 pub struct Client {
     // Unique, 20 char String.
     peer_id: PeerID,
-    inner: reqwest::blocking::Client,
+    inner: reqwest::Client,
 }
 
 impl Client {
     pub fn new(id: PeerID) -> Result<Client> {
-        let client = reqwest::blocking::Client::builder()
+        let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(20))
             .build()?;
         Ok(Client {
@@ -151,7 +151,7 @@ impl Client {
         })
     }
 
-    pub fn find_peers(&self, req: torrent::PeerRequest) -> Result<Peers> {
+    pub async fn find_peers(&self, req: torrent::PeerRequest<'_>) -> Result<Peers> {
         let hash_url_encoded = urlencoding::encode_binary(req.info_hash.get_hash());
 
         let query_params = QueryParams {
@@ -182,11 +182,12 @@ impl Client {
             .inner
             .request(reqwest::Method::GET, full_url)
             .send()
+            .await
             .context("failed to sent GET request")?;
 
         let status = resp.status();
 
-        let body = resp.bytes()?;
+        let body = resp.bytes().await?;
 
         if !status.is_success() {
             anyhow::bail!("Request failed with status: {}", status);
