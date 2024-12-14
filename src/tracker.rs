@@ -6,8 +6,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use log::debug;
 use tokio::net::TcpStream;
 
-use crate::peers::{Peer, PeerID};
-use crate::torrent::{self, Hash};
+use crate::peers::{Peer, PeerID, Peers};
+use crate::torrent::{DownloadRequest, Hash};
 
 const HANDSHAKE_BYTE_SIZE: usize = 68;
 // PORT is for now just hardcoded.
@@ -175,7 +175,7 @@ impl PeerMessage {
 
 #[derive(Debug)]
 struct PiecePayload {
-    block: [u8; BLOCK_SIZE as usize],
+    block: Vec<u8>,
 }
 
 impl PiecePayload {
@@ -186,8 +186,19 @@ impl PiecePayload {
     fn from_bytes(b: &[u8]) -> Result<PiecePayload> {
         let _ = u32::from_be_bytes(b[..4].try_into()?);
         let _ = u32::from_be_bytes(b[4..8].try_into()?);
-        let block: [u8; BLOCK_SIZE as usize] = b[8..8 + BLOCK_SIZE as usize].try_into()?;
-        Ok(PiecePayload { block })
+        let block_rest = &b[8..];
+
+        if block_rest.len() < BLOCK_SIZE as usize {
+            let block = &block_rest;
+            return Ok(PiecePayload {
+                block: block.to_vec(),
+            });
+        } else {
+            let block = &b[8..8 + BLOCK_SIZE as usize];
+            return Ok(PiecePayload {
+                block: block.to_vec(),
+            });
+        }
     }
 }
 
@@ -275,6 +286,12 @@ impl RequestQueue {
     }
 }
 
+struct Piece<'a> {
+    hash: &'a Hash,
+    idx: u32,
+    len: u32,
+}
+
 pub struct Client {
     // Unique, 20 char String.
     peer_id: PeerID,
@@ -284,21 +301,78 @@ impl Client {
     pub fn new(id: PeerID) -> Result<Client> {
         Ok(Client { peer_id: id })
     }
-
-    pub async fn download_piece(
+    pub async fn download_file(
         &self,
+        peers: &Peers,
+        download_req: &DownloadRequest<'_>,
+    ) -> Result<Vec<u8>> {
+        // Implement first downloading the whole File (aka all Pieces) from one Peer.
+        let peer = peers
+            .iter()
+            .next()
+            .ok_or(anyhow!("no peers found in torrent file"))?;
+        let mut stream = self.setup_peer(peer, download_req).await?;
+        let mut file_data: Vec<u8> = Vec::with_capacity(download_req.length as usize);
+
+        debug!("Have {} pieces to download.", download_req.pieces.len());
+        debug!("Piece len is {}.", download_req.piece_length);
+        debug!("Total length is {}.", download_req.length);
+
+        for (idx, hash) in download_req.pieces.iter().enumerate() {
+            let mut piece_len = download_req.piece_length;
+            if idx == download_req.pieces.len() - 1 {
+                // TODO: put that into download_req method.
+                let one_piece_len = download_req.piece_length as usize;
+                let count_full_pieces = download_req.pieces.len() - 1;
+                let total_len = download_req.length;
+                let full_pieces_len = one_piece_len * count_full_pieces;
+                let actual_piece_len = total_len as usize - full_pieces_len;
+                piece_len = actual_piece_len as u32;
+            }
+
+            let piece = Piece {
+                hash,
+                // I know, I know...
+                idx: idx.try_into()?,
+                len: piece_len,
+            };
+            debug!("Starting download of Piece at idx {}", idx);
+            let piece_data = self.download_piece(&piece, &mut stream).await?;
+            file_data.extend_from_slice(&piece_data)
+        }
+
+        Ok(file_data)
+    }
+
+    pub async fn perform_download_piece<'a>(
+        &'a self,
         peer: &Peer,
-        download_req: torrent::DownloadRequest<'_>,
+        download_req: &DownloadRequest<'a>,
         piece_idx: u32,
     ) -> Result<Vec<u8>> {
-        let piece = download_req
+        let mut stream = self.setup_peer(peer, download_req).await?;
+        let hash = download_req
             .pieces
             .get(piece_idx as usize)
             .ok_or(anyhow!("no piece at index {}", piece_idx))?;
+        let piece = Piece {
+            hash,
+            idx: piece_idx,
+            len: download_req.piece_length,
+        };
 
+        self.download_piece(&piece, &mut stream).await
+    }
+
+    async fn setup_peer(
+        &self,
+        peer: &Peer,
+        download_req: &DownloadRequest<'_>,
+    ) -> Result<TcpStream> {
         let mut stream = TcpStream::connect(peer.to_string()).await?;
+
         self.handshake(download_req.info_hash, &mut stream).await?;
-        debug!("Performed Handshake.");
+        debug!("Performed Handshake for {}.", peer);
         let mut reader = PeerMessageReader::new();
 
         // Read Bitfield
@@ -307,13 +381,13 @@ impl Client {
             PeerMessage::Bitfield => {}
             other => bail!("expected Bitfield PeerMessage, got {:?}", other),
         }
-        debug!("Received Bitfield.");
+        debug!("Received Bitfield from {}.", peer);
 
         // Send Interested
         stream
             .write_all(&PeerMessage::Interested.to_bytes())
             .await?;
-        debug!("Sent Interested.");
+        debug!("Sent Interested to {}.", peer);
 
         // Read Unchoke
         msg = reader.from_stream(&mut stream).await?;
@@ -321,13 +395,18 @@ impl Client {
             PeerMessage::Unchoke => {}
             other => bail!("expected Unchoke PeerMessage, got {:?}", other),
         }
-        debug!("Read Unchoke.");
+        debug!("Read Unchoke from {}", peer);
 
+        Ok(stream)
+    }
+
+    async fn download_piece(&self, piece: &Piece<'_>, stream: &mut TcpStream) -> Result<Vec<u8>> {
         // Download Piece by requesting blocks of data until all data is read.
-        let mut piece_data: Vec<u8> = Vec::with_capacity(download_req.piece_length as usize);
-        let req_gen = RequestPayloadGen::new(download_req.piece_length, piece_idx as u32);
+        let mut piece_data: Vec<u8> = Vec::with_capacity(piece.len as usize);
+        let req_gen = RequestPayloadGen::new(piece.len, piece.idx as u32);
         let req_q = RequestQueue::new(req_gen);
         let mut rx = req_q.receiver();
+        let mut reader = PeerMessageReader::new();
         while let Some(Some(req)) = rx.recv().await {
             debug!("Writing request for offset: {}.", req.begin);
             let peer_msg = PeerMessage::Request(req);
@@ -335,7 +414,7 @@ impl Client {
             stream.write_all(&payload).await?;
             debug!("Written Request.");
 
-            msg = reader.from_stream(&mut stream).await?;
+            let msg = reader.from_stream(stream).await?;
             debug!("Read Message from stream.");
             let piece_msg = match msg {
                 PeerMessage::Piece(piece) => piece,
@@ -349,13 +428,15 @@ impl Client {
 
         // Checksums with sha1.
         let downloaded_piece_hash = &Hash::hash(&piece_data);
-        if downloaded_piece_hash != piece {
+        if downloaded_piece_hash != piece.hash {
             bail!(
                 "hash not matching of downloaded piece have: {} want: {}",
                 downloaded_piece_hash.to_hex(),
-                piece.to_hex()
+                piece.hash.to_hex()
             )
         }
+
+        debug!("Download of piece with idx {} was successful", piece.idx);
 
         Ok(piece_data)
     }
@@ -407,14 +488,30 @@ mod tests {
     }
 
     #[test]
+    fn test_request_payload_gen_next_smaller_piece_len() -> Result<(), Box<dyn std::error::Error>> {
+        let piece_len = 6241 as usize;
+        let mut gen = RequestPayloadGen::new(piece_len as u32, 0);
+        let req = gen.next();
+        assert_eq!(req.is_some(), true);
+
+        Ok(())
+    }
+
+    #[test]
     fn test_piece_payload_from_bytes() -> Result<(), Box<dyn std::error::Error>> {
         let mut piece_bytes: Vec<u8> = Vec::new();
         piece_bytes.extend_from_slice(&0u32.to_be_bytes());
         piece_bytes.extend_from_slice(&0u32.to_be_bytes());
         let random_data: Vec<u8> = (0..16384).map(|_| rand::random::<u8>()).collect();
         piece_bytes.extend_from_slice(&random_data);
-
         PiecePayload::from_bytes(&piece_bytes)?;
+
+        let mut smaller_piece_bytes: Vec<u8> = Vec::new();
+        smaller_piece_bytes.extend_from_slice(&0u32.to_be_bytes());
+        smaller_piece_bytes.extend_from_slice(&0u32.to_be_bytes());
+        let random_data: Vec<u8> = (0..1337).map(|_| rand::random::<u8>()).collect();
+        smaller_piece_bytes.extend_from_slice(&random_data);
+        PiecePayload::from_bytes(&smaller_piece_bytes)?;
 
         Ok(())
     }

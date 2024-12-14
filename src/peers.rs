@@ -60,6 +60,12 @@ impl std::str::FromStr for Peer {
     }
 }
 
+impl std::fmt::Display for Peer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.to_string())
+    }
+}
+
 impl Peer {
     fn from_bytes(b: &[u8]) -> Result<Peer> {
         if b.len() != 6 {

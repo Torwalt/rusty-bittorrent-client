@@ -46,6 +46,13 @@ enum Commands {
         #[arg(required = true)]
         piece_index: usize,
     },
+    #[command(alias = "download")]
+    DownloadFile {
+        #[arg(short, long, required = true)]
+        output_path: PathBuf,
+        #[arg(required = true)]
+        torrent_path: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -101,13 +108,34 @@ async fn main() -> Result<()> {
 
             let download_req = torrent.to_download_request();
             let piece_data = tracker_client
-                .download_piece(peer, download_req, piece_index.clone().try_into()?)
+                .perform_download_piece(peer, &download_req, piece_index.clone().try_into()?)
                 .await?;
             let mut file = fs::OpenOptions::new()
                 .write(true)
                 .create(true)
                 .open(output_path)?;
             file.write_all(&piece_data)?;
+        }
+        Some(Commands::DownloadFile {
+            torrent_path,
+            output_path,
+        }) => {
+            let torrent_file = TorrentFile::parse_from_file(torrent_path)?;
+            let torrent = Torrent::from_file_torrent(&torrent_file)?;
+            let download_req = torrent.to_download_request();
+            let id = peers::PeerID::new();
+
+            let peer_client = peers::Client::new(id.clone())?;
+            let peers = peer_client.find_peers(torrent.to_peer_request()).await?;
+
+            let tracker_client = tracker::Client::new(id.clone())?;
+            let file_data = tracker_client.download_file(&peers, &download_req).await?;
+
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .open(output_path)?;
+            file.write_all(&file_data)?;
         }
         None => {}
     };
