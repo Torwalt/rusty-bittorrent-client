@@ -57,6 +57,22 @@ pub struct DownloadRequest<'a> {
     pub info_hash: &'a Hash,
 }
 
+impl<'a> DownloadRequest<'a> {
+    pub fn last_piece_len(&self) -> usize {
+        if self.pieces.len() == 1 {
+            return self.piece_length as usize;
+        }
+
+        let single_piece_len = self.piece_length as usize;
+        let count_full_len_pieces = self.pieces.len() - 1;
+        let total_len = self.length;
+        let full_pieces_len = single_piece_len * count_full_len_pieces;
+        let actual_piece_len = total_len as usize - full_pieces_len;
+
+        actual_piece_len
+    }
+}
+
 pub struct Torrent {
     tracker_url: Url,
     info: Info,

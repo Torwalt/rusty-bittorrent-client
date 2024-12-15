@@ -321,13 +321,7 @@ impl Client {
         for (idx, hash) in download_req.pieces.iter().enumerate() {
             let mut piece_len = download_req.piece_length;
             if idx == download_req.pieces.len() - 1 {
-                // TODO: put that into download_req method.
-                let one_piece_len = download_req.piece_length as usize;
-                let count_full_pieces = download_req.pieces.len() - 1;
-                let total_len = download_req.length;
-                let full_pieces_len = one_piece_len * count_full_pieces;
-                let actual_piece_len = total_len as usize - full_pieces_len;
-                piece_len = actual_piece_len as u32;
+                piece_len = download_req.last_piece_len() as u32;
             }
 
             let piece = Piece {
