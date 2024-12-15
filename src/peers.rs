@@ -122,6 +122,10 @@ impl Peers {
 
         Ok(Peers(out))
     }
+
+    pub(crate) fn into_iter(self) -> std::vec::IntoIter<Peer> {
+        self.0.into_iter()
+    }
 }
 
 impl fmt::Display for Peers {

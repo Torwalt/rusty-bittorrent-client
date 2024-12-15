@@ -1,4 +1,5 @@
 use std::fs;
+use std::sync::Arc;
 use std::io::Write; // bring trait into scope
 use std::path::PathBuf;
 
@@ -108,7 +109,7 @@ async fn main() -> Result<()> {
 
             let download_req = torrent.to_download_request();
             let piece_data = tracker_client
-                .perform_download_piece(peer, &download_req, piece_index.clone().try_into()?)
+                .perform_download_piece(peer, download_req, piece_index.clone().try_into()?)
                 .await?;
             let mut file = fs::OpenOptions::new()
                 .write(true)
@@ -128,8 +129,8 @@ async fn main() -> Result<()> {
             let peer_client = peers::Client::new(id.clone())?;
             let peers = peer_client.find_peers(torrent.to_peer_request()).await?;
 
-            let tracker_client = tracker::Client::new(id.clone())?;
-            let file_data = tracker_client.download_file(&peers, &download_req).await?;
+            let tracker_client = Arc::new(tracker::Client::new(id.clone())?);
+            let file_data = tracker_client.download_file(peers, download_req).await?;
 
             let mut file = fs::OpenOptions::new()
                 .write(true)

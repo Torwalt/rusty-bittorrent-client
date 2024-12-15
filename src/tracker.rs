@@ -1,4 +1,5 @@
 use core::fmt;
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc::{self, Receiver};
 
@@ -173,6 +174,11 @@ impl PeerMessage {
     }
 }
 
+struct FullPiece {
+    data: Vec<u8>,
+    piece: Piece,
+}
+
 #[derive(Debug)]
 struct PiecePayload {
     block: Vec<u8>,
@@ -188,17 +194,46 @@ impl PiecePayload {
         let _ = u32::from_be_bytes(b[4..8].try_into()?);
         let block_rest = &b[8..];
 
-        if block_rest.len() < BLOCK_SIZE as usize {
-            let block = &block_rest;
-            return Ok(PiecePayload {
-                block: block.to_vec(),
-            });
+        let block = if block_rest.len() < BLOCK_SIZE as usize {
+            &block_rest
         } else {
-            let block = &b[8..8 + BLOCK_SIZE as usize];
-            return Ok(PiecePayload {
-                block: block.to_vec(),
-            });
+            &b[8..8 + BLOCK_SIZE as usize]
+        };
+
+        Ok(PiecePayload {
+            block: block.to_vec(),
+        })
+    }
+}
+
+struct DownloadingFile {
+    bytes: Vec<u8>,
+    piece_len: usize,
+    piece_cnt: usize,
+}
+
+impl DownloadingFile {
+    fn new(piece_len: usize, piece_cnt: usize) -> Self {
+        let max_len = piece_len * piece_cnt;
+        let mut bytes = Vec::with_capacity(max_len);
+        bytes.resize(max_len, 0);
+        Self {
+            // Real usage will be less as last piece is usually smaller.
+            bytes,
+            piece_len,
+            piece_cnt,
         }
+    }
+
+    fn add_full_piece(&mut self, fp: FullPiece) -> Result<()> {
+        let idx = fp.piece.idx as usize;
+        let offset = idx * self.piece_len;
+
+        for (i, byte) in fp.data.into_iter().enumerate() {
+            self.bytes.insert(offset + i, byte)
+        }
+
+        Ok(())
     }
 }
 
@@ -286,8 +321,8 @@ impl RequestQueue {
     }
 }
 
-struct Piece<'a> {
-    hash: &'a Hash,
+struct Piece {
+    hash: Hash,
     idx: u32,
     len: u32,
 }
@@ -301,71 +336,125 @@ impl Client {
     pub fn new(id: PeerID) -> Result<Client> {
         Ok(Client { peer_id: id })
     }
-    pub async fn download_file(
-        &self,
-        peers: &Peers,
-        download_req: &DownloadRequest<'_>,
-    ) -> Result<Vec<u8>> {
-        // Implement first downloading the whole File (aka all Pieces) from one Peer.
-        let peer = peers
-            .iter()
-            .next()
-            .ok_or(anyhow!("no peers found in torrent file"))?;
-        let mut stream = self.setup_peer(peer, download_req).await?;
-        let mut file_data: Vec<u8> = Vec::with_capacity(download_req.length as usize);
 
+    pub async fn download_file(
+        // TODO: The whole thing with Arc<Self> is not really needed here, as we just need the
+        // clientID.
+        self: Arc<Self>, // Use Arc<Self> for shared ownership across tasks
+        peers: Peers,    // Use Arc<Peers> for shared ownership across tasks
+        download_req: DownloadRequest,
+    ) -> Result<Vec<u8>> {
         debug!("Have {} pieces to download.", download_req.pieces.len());
         debug!("Piece len is {}.", download_req.piece_length);
         debug!("Total length is {}.", download_req.length);
 
-        for (idx, hash) in download_req.pieces.iter().enumerate() {
-            let mut piece_len = download_req.piece_length;
-            if idx == download_req.pieces.len() - 1 {
-                piece_len = download_req.last_piece_len() as u32;
-            }
+        // TODO: Just dummp all jobs into queue?
+        // Job channel for peer tasks to grab next job.
+        let (job_tx, job_rx) = async_channel::bounded::<Piece>(download_req.pieces.len());
+        // Result channel for tasks to pass pieces to.
+        let (result_tx, mut result_rx) = mpsc::channel::<FullPiece>(10); // Arbitrary num for now.
+
+        let info_hash = Arc::new(download_req.info_hash.clone());
+
+        // Spawn multiple job executors, one for each available Peer.
+        let mut handles = Vec::with_capacity(peers.iter().len());
+        for peer in peers.into_iter() {
+            let self_clone = Arc::clone(&self);
+            let info_hash_clone = Arc::clone(&info_hash);
+            let job_rx_clone = job_rx.clone();
+            let result_tx_clone = result_tx.clone();
+            let handle = tokio::spawn(async move {
+                let peer_info = peer.to_string();
+                let mut stream = self_clone.setup_peer(peer, &info_hash_clone).await?;
+                while let Ok(job) = job_rx_clone.recv().await {
+                    let full_piece = self_clone.download_piece(job, &mut stream).await?;
+                    // TODO: Retry.
+                    result_tx_clone.send(full_piece).await?;
+                }
+                debug!("Closing connection to Peer {}", peer_info);
+
+                Ok::<_, anyhow::Error>(())
+            });
+            handles.push(handle);
+        }
+
+        let piece_len = download_req.piece_length;
+        let last_piece_len = download_req.last_piece_len();
+        let pieces_cnt = download_req.pieces.len();
+
+        // Fill up job queue.
+        for (idx, hash) in download_req.pieces.into_iter().enumerate() {
+            let current_piece_len = if idx + 1 == pieces_cnt {
+                last_piece_len as u32
+            } else {
+                piece_len
+            };
 
             let piece = Piece {
                 hash,
-                // I know, I know...
+                // TODO: Use usize everywhere.
                 idx: idx.try_into()?,
-                len: piece_len,
+                len: current_piece_len,
             };
-            debug!("Starting download of Piece at idx {}", idx);
-            let piece_data = self.download_piece(&piece, &mut stream).await?;
-            file_data.extend_from_slice(&piece_data)
+
+            job_tx
+                .send(piece)
+                .await
+                .context("job channel closed unexpectedly")?;
+        }
+        job_tx.close();
+
+        // Wait for results and gather them.
+        // TODO: Stream directly into file.
+        let mut df = DownloadingFile::new(piece_len as usize, pieces_cnt as usize);
+        let mut piece_counter = 0;
+        while let Some(full_piece) = result_rx.recv().await {
+            df.add_full_piece(full_piece)?;
+
+            piece_counter += 1;
+            if piece_counter == pieces_cnt {
+                break;
+            }
         }
 
-        Ok(file_data)
+        // Collect results from all spawned tasks
+        for handle in handles {
+            if let Err(e) = handle.await? {
+                bail!("Task failed: {:?}", e);
+            }
+        }
+
+        Ok(df.bytes)
     }
 
     pub async fn perform_download_piece<'a>(
         &'a self,
         peer: &Peer,
-        download_req: &DownloadRequest<'a>,
+        download_req: DownloadRequest,
         piece_idx: u32,
     ) -> Result<Vec<u8>> {
-        let mut stream = self.setup_peer(peer, download_req).await?;
+        let mut stream = self
+            .setup_peer(peer.to_owned(), &download_req.info_hash)
+            .await?;
         let hash = download_req
             .pieces
             .get(piece_idx as usize)
-            .ok_or(anyhow!("no piece at index {}", piece_idx))?;
+            .ok_or(anyhow!("no piece at index {}", piece_idx))?
+            .to_owned();
         let piece = Piece {
             hash,
             idx: piece_idx,
             len: download_req.piece_length,
         };
 
-        self.download_piece(&piece, &mut stream).await
+        let full_piece = self.download_piece(piece, &mut stream).await?;
+        Ok(full_piece.data)
     }
 
-    async fn setup_peer(
-        &self,
-        peer: &Peer,
-        download_req: &DownloadRequest<'_>,
-    ) -> Result<TcpStream> {
+    async fn setup_peer(&self, peer: Peer, info_hash: &Hash) -> Result<TcpStream> {
         let mut stream = TcpStream::connect(peer.to_string()).await?;
 
-        self.handshake(download_req.info_hash, &mut stream).await?;
+        self.handshake(info_hash, &mut stream).await?;
         debug!("Performed Handshake for {}.", peer);
         let mut reader = PeerMessageReader::new();
 
@@ -394,7 +483,7 @@ impl Client {
         Ok(stream)
     }
 
-    async fn download_piece(&self, piece: &Piece<'_>, stream: &mut TcpStream) -> Result<Vec<u8>> {
+    async fn download_piece(&self, piece: Piece, stream: &mut TcpStream) -> Result<FullPiece> {
         // Download Piece by requesting blocks of data until all data is read.
         let mut piece_data: Vec<u8> = Vec::with_capacity(piece.len as usize);
         let req_gen = RequestPayloadGen::new(piece.len, piece.idx as u32);
@@ -421,7 +510,7 @@ impl Client {
         rx.close();
 
         // Checksums with sha1.
-        let downloaded_piece_hash = &Hash::hash(&piece_data);
+        let downloaded_piece_hash = Hash::hash(&piece_data);
         if downloaded_piece_hash != piece.hash {
             bail!(
                 "hash not matching of downloaded piece have: {} want: {}",
@@ -432,7 +521,10 @@ impl Client {
 
         debug!("Download of piece with idx {} was successful", piece.idx);
 
-        Ok(piece_data)
+        Ok(FullPiece {
+            data: piece_data,
+            piece,
+        })
     }
 
     pub async fn perform_handshake(&self, peer: &Peer, info_hash: &Hash) -> Result<Handshake> {
@@ -463,6 +555,7 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::Rng;
 
     #[test]
     fn test_request_payload_gen_next() -> Result<(), Box<dyn std::error::Error>> {
@@ -506,6 +599,50 @@ mod tests {
         let random_data: Vec<u8> = (0..1337).map(|_| rand::random::<u8>()).collect();
         smaller_piece_bytes.extend_from_slice(&random_data);
         PiecePayload::from_bytes(&smaller_piece_bytes)?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_downloading_file_add_full_piece() -> Result<(), Box<dyn std::error::Error>> {
+        let data = "this is some text";
+        let piece_len = data.len();
+        let mut df = DownloadingFile::new(piece_len as usize, 5);
+        let mut rng = rand::thread_rng();
+
+        let first_piece = FullPiece {
+            data: data.into(),
+            piece: Piece {
+                hash: Hash::new(rng.gen()),
+                idx: 0,
+                len: piece_len as u32,
+            },
+        };
+        df.add_full_piece(first_piece)?;
+
+        let data2 = "THIS IS SOME TEXT";
+        assert_eq!(piece_len, data2.len());
+
+        let third_piece = FullPiece {
+            data: data2.into(),
+            piece: Piece {
+                hash: Hash::new(rng.gen()),
+                idx: 2,
+                len: piece_len as u32,
+            },
+        };
+        df.add_full_piece(third_piece)?;
+
+        assert_eq!(
+            data.as_bytes(),
+            df.bytes.get(0..17).ok_or("bytes should have first piece")?
+        );
+        assert_eq!(
+            data2.as_bytes(),
+            df.bytes
+                .get(34..51)
+                .ok_or("bytes should have third piece")?
+        );
 
         Ok(())
     }
