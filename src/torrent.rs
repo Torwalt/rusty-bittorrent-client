@@ -51,8 +51,8 @@ pub struct PeerRequest<'a> {
 }
 
 pub struct DownloadRequest {
-    pub length: u32,
-    pub piece_length: u32,
+    pub length: usize,
+    pub piece_length: usize,
     pub pieces: Vec<Hash>,
     pub info_hash: Hash,
 }
@@ -107,8 +107,8 @@ impl Torrent {
 
     pub fn to_download_request(&self) -> DownloadRequest {
         DownloadRequest {
-            length: self.info.length,
-            piece_length: self.info.piece_length,
+            length: self.info.length as usize,
+            piece_length: self.info.piece_length as usize,
             pieces: self.info.pieces.clone(),
             info_hash: self.info.hash.clone(),
         }

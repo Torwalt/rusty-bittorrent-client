@@ -13,21 +13,21 @@ use crate::torrent::{DownloadRequest, Hash};
 
 const HANDSHAKE_BYTE_SIZE: usize = 68;
 // PORT is for now just hardcoded.
-const BLOCK_SIZE: u32 = 16 * 1024;
-const MAX_PAYLOAD_LEN: u32 = 1048576;
+const BLOCK_SIZE: usize = 16 * 1024;
+const MAX_PAYLOAD_LEN: usize = 1048576;
 
-const LENGTH_PREFIX_SIZE_BYTES: u32 = 4;
-const ID_SIZE_BYTES: u32 = 1;
+const LENGTH_PREFIX_SIZE_BYTES: usize = 4;
+const ID_SIZE_BYTES: usize = 1;
 
-const INDEX_SIZE_BYTES: u32 = 4;
-const BEGIN_SIZE_BYTES: u32 = 4;
-const LENGTH_SIZE_BYTES: u32 = 4;
+const INDEX_SIZE_BYTES: usize = 4;
+const BEGIN_SIZE_BYTES: usize = 4;
+const LENGTH_SIZE_BYTES: usize = 4;
 
-const REQUEST_MESSAGE_LENGTH_BYTES: u32 =
+const REQUEST_MESSAGE_LENGTH_BYTES: usize =
     ID_SIZE_BYTES + INDEX_SIZE_BYTES + BEGIN_SIZE_BYTES + LENGTH_SIZE_BYTES;
 
-const REQUEST_PAYLOAD_BYTES_COUNT: u32 = INDEX_SIZE_BYTES + BEGIN_SIZE_BYTES + LENGTH_SIZE_BYTES;
-const REQUEST_BYTES_COUNT: u32 =
+const REQUEST_PAYLOAD_BYTES_COUNT: usize = INDEX_SIZE_BYTES + BEGIN_SIZE_BYTES + LENGTH_SIZE_BYTES;
+const REQUEST_BYTES_COUNT: usize =
     LENGTH_PREFIX_SIZE_BYTES + ID_SIZE_BYTES + REQUEST_PAYLOAD_BYTES_COUNT;
 
 pub struct Handshake {
@@ -100,7 +100,7 @@ impl PeerMessageReader {
         self.meta_buf[4]
     }
 
-    fn payload_len(&self) -> u32 {
+    fn payload_len(&self) -> usize {
         let mut pl = u32::from_be_bytes(
             self.meta_buf[0..4]
                 .try_into()
@@ -110,7 +110,7 @@ impl PeerMessageReader {
         if pl > 0 {
             pl -= 1
         }
-        pl
+        pl as usize
     }
 
     async fn from_stream(&mut self, s: &mut TcpStream) -> Result<PeerMessage> {
@@ -123,7 +123,7 @@ impl PeerMessageReader {
                 payload_len
             );
         }
-        let mut payload_buf = vec![0; payload_len as usize];
+        let mut payload_buf = vec![0; payload_len];
         s.read_exact(&mut payload_buf).await?;
         let pm = PeerMessage::from_bytes(self.ident_byte(), &payload_buf)?;
 
@@ -164,7 +164,7 @@ impl PeerMessage {
             PeerMessage::Interested => vec![0, 0, 0, 1, 2],
             PeerMessage::Bitfield => vec![0, 0, 0, 1, 5],
             PeerMessage::Request(msg) => {
-                let mut out: Vec<u8> = Vec::with_capacity(REQUEST_BYTES_COUNT as usize);
+                let mut out: Vec<u8> = Vec::with_capacity(REQUEST_BYTES_COUNT);
                 out.extend_from_slice(&REQUEST_MESSAGE_LENGTH_BYTES.to_be_bytes());
                 out.extend_from_slice(&6u8.to_be_bytes());
                 msg.append_bytes(&mut out);
@@ -195,10 +195,10 @@ impl PiecePayload {
         let _ = u32::from_be_bytes(b[4..8].try_into()?);
         let block_rest = &b[8..];
 
-        let block = if block_rest.len() < BLOCK_SIZE as usize {
+        let block = if block_rest.len() < BLOCK_SIZE {
             &block_rest
         } else {
-            &b[8..8 + BLOCK_SIZE as usize]
+            &b[8..8 + BLOCK_SIZE]
         };
 
         Ok(PiecePayload {
@@ -220,7 +220,7 @@ impl DownloadingFile {
     }
 
     fn add_full_piece(&mut self, fp: FullPiece) -> Result<()> {
-        let idx = fp.piece.idx as usize;
+        let idx = fp.piece.idx;
         let offset = idx * self.piece_len;
 
         for (i, byte) in fp.data.into_iter().enumerate() {
@@ -232,13 +232,13 @@ impl DownloadingFile {
 }
 
 struct RequestPayloadGen {
-    piece_len: u32,
-    piece_idx: u32,
-    progress: u32,
+    piece_len: usize,
+    piece_idx: usize,
+    progress: usize,
 }
 
 impl RequestPayloadGen {
-    fn new(piece_len: u32, piece_idx: u32) -> Self {
+    fn new(piece_len: usize, piece_idx: usize) -> Self {
         Self {
             piece_len,
             piece_idx,
@@ -253,15 +253,15 @@ impl RequestPayloadGen {
 
         let next_progress = self.progress + BLOCK_SIZE;
         let len = if next_progress <= self.piece_len {
-            BLOCK_SIZE as u32
+            BLOCK_SIZE
         } else {
             self.piece_len - (next_progress - BLOCK_SIZE)
         };
 
         let rp = RequestPayload {
-            index: self.piece_idx,
-            begin: self.progress,
-            length: len,
+            index: self.piece_idx.try_into().expect("must fit into u32"),
+            begin: self.progress.try_into().expect("must fit into u32"),
+            length: len.try_into().expect("must fit into u32"),
         };
         self.progress = next_progress;
         Some(rp)
@@ -318,8 +318,8 @@ impl RequestQueue {
 #[derive(Debug)]
 struct Piece {
     hash: Hash,
-    idx: u32,
-    len: u32,
+    idx: usize,
+    len: usize,
 }
 
 struct PeerWorkerSetup {
@@ -389,15 +389,14 @@ pub async fn download_file(
     debug!("Filling up job channels.");
     for (idx, hash) in download_req.pieces.into_iter().enumerate() {
         let current_piece_len = if idx + 1 == pieces_cnt {
-            last_piece_len as u32
+            last_piece_len
         } else {
             piece_len
         };
 
         let piece = Piece {
             hash,
-            // TODO: Use usize everywhere.
-            idx: idx.try_into()?,
+            idx,
             len: current_piece_len,
         };
 
@@ -411,7 +410,7 @@ pub async fn download_file(
 
     // Wait for results and gather them.
     // TODO: Stream directly into file.
-    let mut df = DownloadingFile::new(piece_len as usize, total_len as usize);
+    let mut df = DownloadingFile::new(piece_len, total_len);
     while let Some(full_piece) = result_rx.recv().await {
         df.add_full_piece(full_piece)?;
     }
@@ -430,12 +429,12 @@ pub async fn perform_download_piece(
     client_id: PeerID,
     peer: &Peer,
     download_req: DownloadRequest,
-    piece_idx: u32,
+    piece_idx: usize,
 ) -> Result<Vec<u8>> {
     let mut stream = setup_peer(&client_id, peer.to_owned(), &download_req.info_hash).await?;
     let hash = download_req
         .pieces
-        .get(piece_idx as usize)
+        .get(piece_idx)
         .ok_or(anyhow!("no piece at index {}", piece_idx))?
         .to_owned();
     let piece = Piece {
@@ -482,8 +481,8 @@ async fn setup_peer(client_id: &PeerID, peer: Peer, info_hash: &Hash) -> Result<
 
 async fn download_piece(piece: Piece, stream: &mut TcpStream) -> Result<FullPiece> {
     // Download Piece by requesting blocks of data until all data is read.
-    let mut piece_data: Vec<u8> = Vec::with_capacity(piece.len as usize);
-    let req_gen = RequestPayloadGen::new(piece.len, piece.idx as u32);
+    let mut piece_data: Vec<u8> = Vec::with_capacity(piece.len);
+    let req_gen = RequestPayloadGen::new(piece.len, piece.idx);
     let req_q = RequestQueue::new(req_gen);
     let mut rx = req_q.receiver();
     let mut reader = PeerMessageReader::new();
@@ -564,8 +563,8 @@ mod tests {
 
     #[test]
     fn test_request_payload_gen_next() -> Result<(), Box<dyn std::error::Error>> {
-        let piece_len = 32768 as usize;
-        let mut gen = RequestPayloadGen::new(piece_len as u32, 0);
+        let piece_len = 32768;
+        let mut gen = RequestPayloadGen::new(piece_len, 0);
         let counts = 2; // BLOCK_SIZE * 2 == piece_len
         let mut cnt = 0;
         for _n in 0..counts {
@@ -581,8 +580,8 @@ mod tests {
 
     #[test]
     fn test_request_payload_gen_next_smaller_piece_len() -> Result<(), Box<dyn std::error::Error>> {
-        let piece_len = 6241 as usize;
-        let mut gen = RequestPayloadGen::new(piece_len as u32, 0);
+        let piece_len = 6241;
+        let mut gen = RequestPayloadGen::new(piece_len, 0);
         let req = gen.next();
         assert_eq!(req.is_some(), true);
 
@@ -612,7 +611,7 @@ mod tests {
     fn test_downloading_file_add_full_piece() -> Result<(), Box<dyn std::error::Error>> {
         let data = "this is some text";
         let piece_len = data.len();
-        let mut df = DownloadingFile::new(piece_len as usize, piece_len * 3);
+        let mut df = DownloadingFile::new(piece_len, piece_len * 3);
         let mut rng = rand::thread_rng();
 
         let first_piece = FullPiece {
@@ -620,7 +619,7 @@ mod tests {
             piece: Piece {
                 hash: Hash::new(rng.gen()),
                 idx: 0,
-                len: piece_len as u32,
+                len: piece_len,
             },
         };
         df.add_full_piece(first_piece)?;
@@ -633,7 +632,7 @@ mod tests {
             piece: Piece {
                 hash: Hash::new(rng.gen()),
                 idx: 2,
-                len: piece_len as u32,
+                len: piece_len,
             },
         };
         df.add_full_piece(third_piece)?;
