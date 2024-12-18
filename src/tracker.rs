@@ -1,5 +1,6 @@
 use core::fmt;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
@@ -224,7 +225,7 @@ impl DownloadingFile {
         let offset = idx * self.piece_len;
 
         for (i, byte) in fp.data.into_iter().enumerate() {
-            self.bytes.insert(offset + i, byte)
+            self.bytes[offset + i] = byte
         }
 
         Ok(())
@@ -315,11 +316,23 @@ impl RequestQueue {
     }
 }
 
-#[derive(Debug)]
 struct Piece {
     hash: Hash,
     idx: usize,
     len: usize,
+}
+
+impl fmt::Display for Piece {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(
+            f,
+            "hash: {}, idx: {}, len: {}",
+            self.hash.to_string(),
+            self.idx,
+            self.len
+        )?;
+        Ok(())
+    }
 }
 
 struct PeerWorkerSetup {
@@ -344,6 +357,7 @@ fn setup_peer_workers(pws: PeerWorkerSetup) -> Vec<JoinHandle<Result<(), anyhow:
                 let peer_info = peer.to_string();
                 let mut stream = setup_peer(&client_id, peer, &info_hash).await?;
                 while let Ok(job) = job_rx.recv().await {
+                    debug!("Executing Job {} on Peer {}", job, peer_info);
                     let full_piece = download_piece(job, &mut stream).await?;
                     // TODO: Retry.
                     result_tx.send(full_piece).await?;
@@ -400,6 +414,7 @@ pub async fn download_file(
             len: current_piece_len,
         };
 
+        debug!("Sending job {}", piece);
         job_tx
             .send(piece)
             .await
@@ -412,6 +427,14 @@ pub async fn download_file(
     // TODO: Stream directly into file.
     let mut df = DownloadingFile::new(piece_len, total_len);
     while let Some(full_piece) = result_rx.recv().await {
+        debug!(
+            "Received FullPiece {} at {}",
+            full_piece.piece,
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("Time went backwards")
+                .as_micros()
+        );
         df.add_full_piece(full_piece)?;
     }
 
