@@ -133,6 +133,7 @@ async fn main() -> Result<()> {
 
             let mut file = fs::OpenOptions::new()
                 .write(true)
+                .truncate(true)
                 .create(true)
                 .open(output_path)?;
             file.write_all(&file_data)?;

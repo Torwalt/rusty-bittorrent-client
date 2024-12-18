@@ -1,11 +1,12 @@
 use core::fmt;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::mpsc::{self, Receiver};
+use tokio::sync::mpsc::{self, Receiver, Sender};
 
 use anyhow::{anyhow, bail, Context, Result};
 use log::debug;
 use tokio::net::TcpStream;
+use tokio::task::JoinHandle;
 
 use crate::peers::{Peer, PeerID, Peers};
 use crate::torrent::{DownloadRequest, Hash};
@@ -321,33 +322,23 @@ struct Piece {
     len: u32,
 }
 
-pub async fn download_file(
-    client_id: PeerID,
+struct PeerWorkerSetup {
+    info_hash: Arc<Hash>,
+    client_id: Arc<PeerID>,
+    result_tx: Arc<Sender<FullPiece>>,
+    job_rx: Arc<async_channel::Receiver<Piece>>,
     peers: Peers,
-    download_req: DownloadRequest,
-) -> Result<Vec<u8>> {
-    debug!("Have {} pieces to download.", download_req.pieces.len());
-    debug!("Piece len is {}.", download_req.piece_length);
-    debug!("Total length is {}.", download_req.length);
+}
 
-    // Job channel for peer tasks to grab next job.
-    let (job_tx, job_rx) = async_channel::bounded::<Piece>(download_req.pieces.len());
-    // Result channel for tasks to pass pieces to.
-    let (result_tx, mut result_rx) = mpsc::channel::<FullPiece>(10); // Arbitrary num for now.
-
-    let info_hash = Arc::new(download_req.info_hash.clone());
-    let client_id = Arc::new(client_id);
-    let result_tx = Arc::new(result_tx);
-    let job_rx = Arc::new(job_rx);
-
+fn setup_peer_workers(pws: PeerWorkerSetup) -> Vec<JoinHandle<Result<(), anyhow::Error>>> {
     // Spawn multiple job executors, one for each available Peer.
-    let mut handles = Vec::with_capacity(peers.len());
-    for peer in peers.into_iter() {
+    let mut handles = Vec::with_capacity(pws.peers.len());
+    for peer in pws.peers.into_iter() {
         let handle = tokio::spawn({
-            let info_hash = Arc::clone(&info_hash);
-            let job_rx = Arc::clone(&job_rx);
-            let result_tx = Arc::clone(&result_tx);
-            let client_id = Arc::clone(&client_id);
+            let info_hash = Arc::clone(&pws.info_hash);
+            let job_rx = Arc::clone(&pws.job_rx);
+            let result_tx = Arc::clone(&pws.result_tx);
+            let client_id = Arc::clone(&pws.client_id);
 
             async move {
                 let peer_info = peer.to_string();
@@ -364,13 +355,38 @@ pub async fn download_file(
         });
         handles.push(handle);
     }
+    handles
+}
+
+pub async fn download_file(
+    client_id: PeerID,
+    peers: Peers,
+    download_req: DownloadRequest,
+) -> Result<Vec<u8>> {
+    debug!("Have {} pieces to download.", download_req.pieces.len());
+    debug!("Piece len is {}.", download_req.piece_length);
+    debug!("Total length is {}.", download_req.length);
+
+    // Job channel for peer tasks to grab next job.
+    let (job_tx, job_rx) = async_channel::bounded::<Piece>(download_req.pieces.len());
+    // Result channel for tasks to pass pieces to.
+    let (result_tx, mut result_rx) = mpsc::channel::<FullPiece>(10); // Arbitrary num for now.
 
     let piece_len = download_req.piece_length;
     let last_piece_len = download_req.last_piece_len();
     let pieces_cnt = download_req.pieces.len();
     let total_len = download_req.length;
 
-    // Fill up job queue.
+    // Spawn multiple job executors, one for each available Peer.
+    let handles = setup_peer_workers(PeerWorkerSetup {
+        info_hash: Arc::new(download_req.info_hash),
+        client_id: Arc::new(client_id),
+        result_tx: Arc::new(result_tx),
+        job_rx: Arc::new(job_rx),
+        peers,
+    });
+
+    debug!("Filling up job channels.");
     for (idx, hash) in download_req.pieces.into_iter().enumerate() {
         let current_piece_len = if idx + 1 == pieces_cnt {
             last_piece_len as u32
@@ -391,19 +407,13 @@ pub async fn download_file(
             .context("job channel closed unexpectedly")?;
     }
     job_tx.close();
+    debug!("Closed job channels.");
 
     // Wait for results and gather them.
     // TODO: Stream directly into file.
     let mut df = DownloadingFile::new(piece_len as usize, total_len as usize);
-    let mut piece_counter = 0;
     while let Some(full_piece) = result_rx.recv().await {
         df.add_full_piece(full_piece)?;
-
-        // TODO: Remove counter, should work...
-        piece_counter += 1;
-        if piece_counter == pieces_cnt {
-            break;
-        }
     }
 
     // Collect results from all spawned tasks
