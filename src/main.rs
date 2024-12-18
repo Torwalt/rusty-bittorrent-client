@@ -1,7 +1,7 @@
 use std::fs;
-use std::sync::Arc;
 use std::io::Write; // bring trait into scope
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use bencode::decode;
@@ -83,10 +83,8 @@ async fn main() -> Result<()> {
             let torrent_file = TorrentFile::parse_from_file(torrent_path)?;
             let torrent = Torrent::from_file_torrent(&torrent_file)?;
             let id = peers::PeerID::new();
-            let client = tracker::Client::new(id)?;
-            let handshake = client
-                .perform_handshake(peer, &torrent.to_peer_request().info_hash)
-                .await?;
+            let handshake =
+                tracker::perform_handshake(id, peer, &torrent.to_peer_request().info_hash).await?;
             println!("{}", handshake)
         }
         Some(Commands::DownloadPiece {
@@ -99,7 +97,6 @@ async fn main() -> Result<()> {
             let id = peers::PeerID::new();
 
             let peer_client = peers::Client::new(id.clone())?;
-            let tracker_client = tracker::Client::new(id.clone())?;
 
             let peers = peer_client.find_peers(torrent.to_peer_request()).await?;
             let peer = peers
@@ -108,9 +105,13 @@ async fn main() -> Result<()> {
                 .ok_or(anyhow!("no peers found in torrent file"))?;
 
             let download_req = torrent.to_download_request();
-            let piece_data = tracker_client
-                .perform_download_piece(peer, download_req, piece_index.clone().try_into()?)
-                .await?;
+            let piece_data = tracker::perform_download_piece(
+                id,
+                peer,
+                download_req,
+                piece_index.clone().try_into()?,
+            )
+            .await?;
             let mut file = fs::OpenOptions::new()
                 .write(true)
                 .create(true)
@@ -129,8 +130,7 @@ async fn main() -> Result<()> {
             let peer_client = peers::Client::new(id.clone())?;
             let peers = peer_client.find_peers(torrent.to_peer_request()).await?;
 
-            let tracker_client = Arc::new(tracker::Client::new(id.clone())?);
-            let file_data = tracker_client.download_file(peers, download_req).await?;
+            let file_data = tracker::download_file(id, peers, download_req).await?;
 
             let mut file = fs::OpenOptions::new()
                 .write(true)

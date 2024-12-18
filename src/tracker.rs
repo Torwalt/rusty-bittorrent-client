@@ -327,229 +327,215 @@ struct Piece {
     len: u32,
 }
 
-pub struct Client {
-    // Unique, 20 char String.
-    peer_id: PeerID,
-}
+pub async fn download_file(
+    client_id: PeerID,
+    peers: Peers, // Use Arc<Peers> for shared ownership across tasks
+    download_req: DownloadRequest,
+) -> Result<Vec<u8>> {
+    debug!("Have {} pieces to download.", download_req.pieces.len());
+    debug!("Piece len is {}.", download_req.piece_length);
+    debug!("Total length is {}.", download_req.length);
 
-impl Client {
-    pub fn new(id: PeerID) -> Result<Client> {
-        Ok(Client { peer_id: id })
+    // TODO: Just dummp all jobs into queue?
+    // Job channel for peer tasks to grab next job.
+    let (job_tx, job_rx) = async_channel::bounded::<Piece>(download_req.pieces.len());
+    // Result channel for tasks to pass pieces to.
+    let (result_tx, mut result_rx) = mpsc::channel::<FullPiece>(10); // Arbitrary num for now.
+
+    let info_hash = Arc::new(download_req.info_hash.clone());
+    let c_id = Arc::new(client_id);
+
+    // Spawn multiple job executors, one for each available Peer.
+    let mut handles = Vec::with_capacity(peers.iter().len());
+    for peer in peers.into_iter() {
+        let info_hash_clone = Arc::clone(&info_hash);
+        let job_rx_clone = job_rx.clone();
+        let result_tx_clone = result_tx.clone();
+        let c_id_clone = Arc::clone(&c_id);
+        let handle = tokio::spawn(async move {
+            let peer_info = peer.to_string();
+            let mut stream = setup_peer(&c_id_clone, peer, &info_hash_clone).await?;
+            while let Ok(job) = job_rx_clone.recv().await {
+                let full_piece = download_piece(job, &mut stream).await?;
+                // TODO: Retry.
+                result_tx_clone.send(full_piece).await?;
+            }
+            debug!("Closing connection to Peer {}", peer_info);
+
+            Ok::<_, anyhow::Error>(())
+        });
+        handles.push(handle);
     }
 
-    pub async fn download_file(
-        // TODO: The whole thing with Arc<Self> is not really needed here, as we just need the
-        // clientID.
-        self: Arc<Self>, // Use Arc<Self> for shared ownership across tasks
-        peers: Peers,    // Use Arc<Peers> for shared ownership across tasks
-        download_req: DownloadRequest,
-    ) -> Result<Vec<u8>> {
-        debug!("Have {} pieces to download.", download_req.pieces.len());
-        debug!("Piece len is {}.", download_req.piece_length);
-        debug!("Total length is {}.", download_req.length);
+    let piece_len = download_req.piece_length;
+    let last_piece_len = download_req.last_piece_len();
+    let pieces_cnt = download_req.pieces.len();
 
-        // TODO: Just dummp all jobs into queue?
-        // Job channel for peer tasks to grab next job.
-        let (job_tx, job_rx) = async_channel::bounded::<Piece>(download_req.pieces.len());
-        // Result channel for tasks to pass pieces to.
-        let (result_tx, mut result_rx) = mpsc::channel::<FullPiece>(10); // Arbitrary num for now.
-
-        let info_hash = Arc::new(download_req.info_hash.clone());
-
-        // Spawn multiple job executors, one for each available Peer.
-        let mut handles = Vec::with_capacity(peers.iter().len());
-        for peer in peers.into_iter() {
-            let self_clone = Arc::clone(&self);
-            let info_hash_clone = Arc::clone(&info_hash);
-            let job_rx_clone = job_rx.clone();
-            let result_tx_clone = result_tx.clone();
-            let handle = tokio::spawn(async move {
-                let peer_info = peer.to_string();
-                let mut stream = self_clone.setup_peer(peer, &info_hash_clone).await?;
-                while let Ok(job) = job_rx_clone.recv().await {
-                    let full_piece = self_clone.download_piece(job, &mut stream).await?;
-                    // TODO: Retry.
-                    result_tx_clone.send(full_piece).await?;
-                }
-                debug!("Closing connection to Peer {}", peer_info);
-
-                Ok::<_, anyhow::Error>(())
-            });
-            handles.push(handle);
-        }
-
-        let piece_len = download_req.piece_length;
-        let last_piece_len = download_req.last_piece_len();
-        let pieces_cnt = download_req.pieces.len();
-
-        // Fill up job queue.
-        for (idx, hash) in download_req.pieces.into_iter().enumerate() {
-            let current_piece_len = if idx + 1 == pieces_cnt {
-                last_piece_len as u32
-            } else {
-                piece_len
-            };
-
-            let piece = Piece {
-                hash,
-                // TODO: Use usize everywhere.
-                idx: idx.try_into()?,
-                len: current_piece_len,
-            };
-
-            job_tx
-                .send(piece)
-                .await
-                .context("job channel closed unexpectedly")?;
-        }
-        job_tx.close();
-
-        // Wait for results and gather them.
-        // TODO: Stream directly into file.
-        let mut df = DownloadingFile::new(piece_len as usize, pieces_cnt as usize);
-        let mut piece_counter = 0;
-        while let Some(full_piece) = result_rx.recv().await {
-            df.add_full_piece(full_piece)?;
-
-            piece_counter += 1;
-            if piece_counter == pieces_cnt {
-                break;
-            }
-        }
-
-        // Collect results from all spawned tasks
-        for handle in handles {
-            if let Err(e) = handle.await? {
-                bail!("Task failed: {:?}", e);
-            }
-        }
-
-        Ok(df.bytes)
-    }
-
-    pub async fn perform_download_piece<'a>(
-        &'a self,
-        peer: &Peer,
-        download_req: DownloadRequest,
-        piece_idx: u32,
-    ) -> Result<Vec<u8>> {
-        let mut stream = self
-            .setup_peer(peer.to_owned(), &download_req.info_hash)
-            .await?;
-        let hash = download_req
-            .pieces
-            .get(piece_idx as usize)
-            .ok_or(anyhow!("no piece at index {}", piece_idx))?
-            .to_owned();
-        let piece = Piece {
-            hash,
-            idx: piece_idx,
-            len: download_req.piece_length,
+    // Fill up job queue.
+    for (idx, hash) in download_req.pieces.into_iter().enumerate() {
+        let current_piece_len = if idx + 1 == pieces_cnt {
+            last_piece_len as u32
+        } else {
+            piece_len
         };
 
-        let full_piece = self.download_piece(piece, &mut stream).await?;
-        Ok(full_piece.data)
+        let piece = Piece {
+            hash,
+            // TODO: Use usize everywhere.
+            idx: idx.try_into()?,
+            len: current_piece_len,
+        };
+
+        job_tx
+            .send(piece)
+            .await
+            .context("job channel closed unexpectedly")?;
+    }
+    job_tx.close();
+
+    // Wait for results and gather them.
+    // TODO: Stream directly into file.
+    let mut df = DownloadingFile::new(piece_len as usize, pieces_cnt as usize);
+    let mut piece_counter = 0;
+    while let Some(full_piece) = result_rx.recv().await {
+        df.add_full_piece(full_piece)?;
+
+        piece_counter += 1;
+        if piece_counter == pieces_cnt {
+            break;
+        }
     }
 
-    async fn setup_peer(&self, peer: Peer, info_hash: &Hash) -> Result<TcpStream> {
-        let mut stream = TcpStream::connect(peer.to_string()).await?;
-
-        self.handshake(info_hash, &mut stream).await?;
-        debug!("Performed Handshake for {}.", peer);
-        let mut reader = PeerMessageReader::new();
-
-        // Read Bitfield
-        let mut msg = reader.from_stream(&mut stream).await?;
-        match msg {
-            PeerMessage::Bitfield => {}
-            other => bail!("expected Bitfield PeerMessage, got {:?}", other),
+    // Collect results from all spawned tasks
+    for handle in handles {
+        if let Err(e) = handle.await? {
+            bail!("Task failed: {:?}", e);
         }
-        debug!("Received Bitfield from {}.", peer);
-
-        // Send Interested
-        stream
-            .write_all(&PeerMessage::Interested.to_bytes())
-            .await?;
-        debug!("Sent Interested to {}.", peer);
-
-        // Read Unchoke
-        msg = reader.from_stream(&mut stream).await?;
-        match msg {
-            PeerMessage::Unchoke => {}
-            other => bail!("expected Unchoke PeerMessage, got {:?}", other),
-        }
-        debug!("Read Unchoke from {}", peer);
-
-        Ok(stream)
     }
 
-    async fn download_piece(&self, piece: Piece, stream: &mut TcpStream) -> Result<FullPiece> {
-        // Download Piece by requesting blocks of data until all data is read.
-        let mut piece_data: Vec<u8> = Vec::with_capacity(piece.len as usize);
-        let req_gen = RequestPayloadGen::new(piece.len, piece.idx as u32);
-        let req_q = RequestQueue::new(req_gen);
-        let mut rx = req_q.receiver();
-        let mut reader = PeerMessageReader::new();
-        while let Some(Some(req)) = rx.recv().await {
-            debug!("Writing request for offset: {}.", req.begin);
-            let peer_msg = PeerMessage::Request(req);
-            let payload = peer_msg.to_bytes();
-            stream.write_all(&payload).await?;
-            debug!("Written Request.");
+    Ok(df.bytes)
+}
 
-            let msg = reader.from_stream(stream).await?;
-            debug!("Read Message from stream.");
-            let piece_msg = match msg {
-                PeerMessage::Piece(piece) => piece,
-                other => bail!("expected Piece PeerMessage, got {:?}", other),
-            };
-            debug!("Received Piece data.");
-            piece_data.append(&mut piece_msg.block.to_vec());
-        }
-        debug!("Closing receiver channel.");
-        rx.close();
+pub async fn perform_download_piece(
+    client_id: PeerID,
+    peer: &Peer,
+    download_req: DownloadRequest,
+    piece_idx: u32,
+) -> Result<Vec<u8>> {
+    let mut stream = setup_peer(&client_id, peer.to_owned(), &download_req.info_hash).await?;
+    let hash = download_req
+        .pieces
+        .get(piece_idx as usize)
+        .ok_or(anyhow!("no piece at index {}", piece_idx))?
+        .to_owned();
+    let piece = Piece {
+        hash,
+        idx: piece_idx,
+        len: download_req.piece_length,
+    };
 
-        // Checksums with sha1.
-        let downloaded_piece_hash = Hash::hash(&piece_data);
-        if downloaded_piece_hash != piece.hash {
-            bail!(
-                "hash not matching of downloaded piece have: {} want: {}",
-                downloaded_piece_hash.to_hex(),
-                piece.hash.to_hex()
-            )
-        }
+    let full_piece = download_piece(piece, &mut stream).await?;
+    Ok(full_piece.data)
+}
 
-        debug!("Download of piece with idx {} was successful", piece.idx);
+async fn setup_peer(client_id: &PeerID, peer: Peer, info_hash: &Hash) -> Result<TcpStream> {
+    let mut stream = TcpStream::connect(peer.to_string()).await?;
 
-        Ok(FullPiece {
-            data: piece_data,
-            piece,
-        })
+    handshake(client_id, info_hash, &mut stream).await?;
+    debug!("Performed Handshake for {}.", peer);
+    let mut reader = PeerMessageReader::new();
+
+    // Read Bitfield
+    let mut msg = reader.from_stream(&mut stream).await?;
+    match msg {
+        PeerMessage::Bitfield => {}
+        other => bail!("expected Bitfield PeerMessage, got {:?}", other),
+    }
+    debug!("Received Bitfield from {}.", peer);
+
+    // Send Interested
+    stream
+        .write_all(&PeerMessage::Interested.to_bytes())
+        .await?;
+    debug!("Sent Interested to {}.", peer);
+
+    // Read Unchoke
+    msg = reader.from_stream(&mut stream).await?;
+    match msg {
+        PeerMessage::Unchoke => {}
+        other => bail!("expected Unchoke PeerMessage, got {:?}", other),
+    }
+    debug!("Read Unchoke from {}", peer);
+
+    Ok(stream)
+}
+
+async fn download_piece(piece: Piece, stream: &mut TcpStream) -> Result<FullPiece> {
+    // Download Piece by requesting blocks of data until all data is read.
+    let mut piece_data: Vec<u8> = Vec::with_capacity(piece.len as usize);
+    let req_gen = RequestPayloadGen::new(piece.len, piece.idx as u32);
+    let req_q = RequestQueue::new(req_gen);
+    let mut rx = req_q.receiver();
+    let mut reader = PeerMessageReader::new();
+    while let Some(Some(req)) = rx.recv().await {
+        debug!("Writing request for offset: {}.", req.begin);
+        let peer_msg = PeerMessage::Request(req);
+        let payload = peer_msg.to_bytes();
+        stream.write_all(&payload).await?;
+        debug!("Written Request.");
+
+        let msg = reader.from_stream(stream).await?;
+        debug!("Read Message from stream.");
+        let piece_msg = match msg {
+            PeerMessage::Piece(piece) => piece,
+            other => bail!("expected Piece PeerMessage, got {:?}", other),
+        };
+        debug!("Received Piece data.");
+        piece_data.append(&mut piece_msg.block.to_vec());
+    }
+    debug!("Closing receiver channel.");
+    rx.close();
+
+    // Checksums with sha1.
+    let downloaded_piece_hash = Hash::hash(&piece_data);
+    if downloaded_piece_hash != piece.hash {
+        bail!(
+            "hash not matching of downloaded piece have: {} want: {}",
+            downloaded_piece_hash.to_hex(),
+            piece.hash.to_hex()
+        )
     }
 
-    pub async fn perform_handshake(&self, peer: &Peer, info_hash: &Hash) -> Result<Handshake> {
-        let mut stream = TcpStream::connect(peer.to_string()).await?;
-        self.handshake(info_hash, &mut stream).await
-    }
+    debug!("Download of piece with idx {} was successful", piece.idx);
 
-    async fn handshake(&self, info_hash: &Hash, stream: &mut TcpStream) -> Result<Handshake> {
-        let handshake = Handshake::new(info_hash, &self.peer_id);
-        let bytes = handshake.to_bytes();
+    Ok(FullPiece {
+        data: piece_data,
+        piece,
+    })
+}
 
-        stream.write_all(&bytes).await?;
+pub async fn perform_handshake(client_id: PeerID, peer: &Peer, info_hash: &Hash) -> Result<Handshake> {
+    let mut stream = TcpStream::connect(peer.to_string()).await?;
+    handshake(&client_id, info_hash, &mut stream).await
+}
 
-        let mut buf = [0; HANDSHAKE_BYTE_SIZE];
-        let mut total_read = 0;
-        while total_read < HANDSHAKE_BYTE_SIZE {
-            let bytes_read = stream.read(&mut buf[total_read..]).await?;
-            if bytes_read == 0 {
-                bail!("Connection closed before handshake was fully read")
-            }
-            total_read += bytes_read;
+async fn handshake(client_id: &PeerID, info_hash: &Hash, stream: &mut TcpStream) -> Result<Handshake> {
+    let handshake = Handshake::new(info_hash, client_id);
+    let bytes = handshake.to_bytes();
+
+    stream.write_all(&bytes).await?;
+
+    let mut buf = [0; HANDSHAKE_BYTE_SIZE];
+    let mut total_read = 0;
+    while total_read < HANDSHAKE_BYTE_SIZE {
+        let bytes_read = stream.read(&mut buf[total_read..]).await?;
+        if bytes_read == 0 {
+            bail!("Connection closed before handshake was fully read")
         }
-
-        Handshake::from_bytes(buf)
+        total_read += bytes_read;
     }
+
+    Handshake::from_bytes(buf)
 }
 
 #[cfg(test)]
