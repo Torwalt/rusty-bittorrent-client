@@ -212,15 +212,10 @@ struct DownloadingFile {
 }
 
 impl DownloadingFile {
-    fn new(piece_len: usize, piece_cnt: usize) -> Self {
-        let max_len = piece_len * piece_cnt;
-        let mut bytes = Vec::with_capacity(max_len);
-        bytes.resize(max_len, 0);
-        Self {
-            // Real usage will be less as last piece is usually smaller.
-            bytes,
-            piece_len,
-        }
+    fn new(piece_len: usize, total_len: usize) -> Self {
+        let mut bytes = Vec::with_capacity(total_len);
+        bytes.resize(total_len, 0);
+        Self { bytes, piece_len }
     }
 
     fn add_full_piece(&mut self, fp: FullPiece) -> Result<()> {
@@ -319,6 +314,7 @@ impl RequestQueue {
     }
 }
 
+#[derive(Debug)]
 struct Piece {
     hash: Hash,
     idx: u32,
@@ -372,6 +368,7 @@ pub async fn download_file(
     let piece_len = download_req.piece_length;
     let last_piece_len = download_req.last_piece_len();
     let pieces_cnt = download_req.pieces.len();
+    let total_len = download_req.length;
 
     // Fill up job queue.
     for (idx, hash) in download_req.pieces.into_iter().enumerate() {
@@ -397,11 +394,12 @@ pub async fn download_file(
 
     // Wait for results and gather them.
     // TODO: Stream directly into file.
-    let mut df = DownloadingFile::new(piece_len as usize, pieces_cnt as usize);
+    let mut df = DownloadingFile::new(piece_len as usize, total_len as usize);
     let mut piece_counter = 0;
     while let Some(full_piece) = result_rx.recv().await {
         df.add_full_piece(full_piece)?;
 
+        // TODO: Remove counter, should work...
         piece_counter += 1;
         if piece_counter == pieces_cnt {
             break;
@@ -495,6 +493,7 @@ async fn download_piece(piece: Piece, stream: &mut TcpStream) -> Result<FullPiec
         debug!("Received Piece data.");
         piece_data.append(&mut piece_msg.block.to_vec());
     }
+
     debug!("Closing receiver channel.");
     rx.close();
 
@@ -603,7 +602,7 @@ mod tests {
     fn test_downloading_file_add_full_piece() -> Result<(), Box<dyn std::error::Error>> {
         let data = "this is some text";
         let piece_len = data.len();
-        let mut df = DownloadingFile::new(piece_len as usize, 5);
+        let mut df = DownloadingFile::new(piece_len as usize, piece_len * 3);
         let mut rng = rand::thread_rng();
 
         let first_piece = FullPiece {

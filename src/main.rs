@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::Write; // bring trait into scope
+use std::io::Write;
 use std::path::PathBuf;
 
 use anyhow::{anyhow, Result};

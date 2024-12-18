@@ -166,6 +166,7 @@ impl Info {
     }
 }
 
+#[derive(Debug)]
 pub struct Hash([u8; 20]);
 
 impl Clone for Hash {
