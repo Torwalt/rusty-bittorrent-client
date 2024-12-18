@@ -126,6 +126,10 @@ impl Peers {
     pub(crate) fn into_iter(self) -> std::vec::IntoIter<Peer> {
         self.0.into_iter()
     }
+
+    pub(crate) fn len(&self) -> usize {
+        self.0.len()
+    }
 }
 
 impl fmt::Display for Peers {

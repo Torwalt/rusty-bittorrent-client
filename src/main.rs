@@ -1,7 +1,6 @@
 use std::fs;
 use std::io::Write; // bring trait into scope
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use bencode::decode;

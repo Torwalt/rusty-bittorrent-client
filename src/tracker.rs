@@ -209,7 +209,6 @@ impl PiecePayload {
 struct DownloadingFile {
     bytes: Vec<u8>,
     piece_len: usize,
-    piece_cnt: usize,
 }
 
 impl DownloadingFile {
@@ -221,7 +220,6 @@ impl DownloadingFile {
             // Real usage will be less as last piece is usually smaller.
             bytes,
             piece_len,
-            piece_cnt,
         }
     }
 
@@ -329,40 +327,44 @@ struct Piece {
 
 pub async fn download_file(
     client_id: PeerID,
-    peers: Peers, // Use Arc<Peers> for shared ownership across tasks
+    peers: Peers,
     download_req: DownloadRequest,
 ) -> Result<Vec<u8>> {
     debug!("Have {} pieces to download.", download_req.pieces.len());
     debug!("Piece len is {}.", download_req.piece_length);
     debug!("Total length is {}.", download_req.length);
 
-    // TODO: Just dummp all jobs into queue?
     // Job channel for peer tasks to grab next job.
     let (job_tx, job_rx) = async_channel::bounded::<Piece>(download_req.pieces.len());
     // Result channel for tasks to pass pieces to.
     let (result_tx, mut result_rx) = mpsc::channel::<FullPiece>(10); // Arbitrary num for now.
 
     let info_hash = Arc::new(download_req.info_hash.clone());
-    let c_id = Arc::new(client_id);
+    let client_id = Arc::new(client_id);
+    let result_tx = Arc::new(result_tx);
+    let job_rx = Arc::new(job_rx);
 
     // Spawn multiple job executors, one for each available Peer.
-    let mut handles = Vec::with_capacity(peers.iter().len());
+    let mut handles = Vec::with_capacity(peers.len());
     for peer in peers.into_iter() {
-        let info_hash_clone = Arc::clone(&info_hash);
-        let job_rx_clone = job_rx.clone();
-        let result_tx_clone = result_tx.clone();
-        let c_id_clone = Arc::clone(&c_id);
-        let handle = tokio::spawn(async move {
-            let peer_info = peer.to_string();
-            let mut stream = setup_peer(&c_id_clone, peer, &info_hash_clone).await?;
-            while let Ok(job) = job_rx_clone.recv().await {
-                let full_piece = download_piece(job, &mut stream).await?;
-                // TODO: Retry.
-                result_tx_clone.send(full_piece).await?;
-            }
-            debug!("Closing connection to Peer {}", peer_info);
+        let handle = tokio::spawn({
+            let info_hash = Arc::clone(&info_hash);
+            let job_rx = Arc::clone(&job_rx);
+            let result_tx = Arc::clone(&result_tx);
+            let client_id = Arc::clone(&client_id);
 
-            Ok::<_, anyhow::Error>(())
+            async move {
+                let peer_info = peer.to_string();
+                let mut stream = setup_peer(&client_id, peer, &info_hash).await?;
+                while let Ok(job) = job_rx.recv().await {
+                    let full_piece = download_piece(job, &mut stream).await?;
+                    // TODO: Retry.
+                    result_tx.send(full_piece).await?;
+                }
+                debug!("Closing connection to Peer {}", peer_info);
+
+                Ok::<_, anyhow::Error>(())
+            }
         });
         handles.push(handle);
     }
@@ -514,12 +516,20 @@ async fn download_piece(piece: Piece, stream: &mut TcpStream) -> Result<FullPiec
     })
 }
 
-pub async fn perform_handshake(client_id: PeerID, peer: &Peer, info_hash: &Hash) -> Result<Handshake> {
+pub async fn perform_handshake(
+    client_id: PeerID,
+    peer: &Peer,
+    info_hash: &Hash,
+) -> Result<Handshake> {
     let mut stream = TcpStream::connect(peer.to_string()).await?;
     handshake(&client_id, info_hash, &mut stream).await
 }
 
-async fn handshake(client_id: &PeerID, info_hash: &Hash, stream: &mut TcpStream) -> Result<Handshake> {
+async fn handshake(
+    client_id: &PeerID,
+    info_hash: &Hash,
+    stream: &mut TcpStream,
+) -> Result<Handshake> {
     let handshake = Handshake::new(info_hash, client_id);
     let bytes = handshake.to_bytes();
 
