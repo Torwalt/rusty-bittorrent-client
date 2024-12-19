@@ -1,4 +1,8 @@
 use core::fmt;
+use std::fs::{self, File};
+use std::io::SeekFrom;
+use std::io::{Seek, Write};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -209,24 +213,27 @@ impl PiecePayload {
 }
 
 struct DownloadingFile {
-    bytes: Vec<u8>,
     piece_len: usize,
+    file: File,
 }
 
 impl DownloadingFile {
-    fn new(piece_len: usize, total_len: usize) -> Self {
-        let mut bytes = Vec::with_capacity(total_len);
-        bytes.resize(total_len, 0);
-        Self { bytes, piece_len }
+    fn new(piece_len: usize, dest: PathBuf) -> Result<Self> {
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .create(true)
+            .open(dest)?;
+
+        Ok(Self { piece_len, file })
     }
 
-    fn add_full_piece(&mut self, fp: FullPiece) -> Result<()> {
+    fn write_full_piece(&mut self, fp: FullPiece) -> Result<()> {
         let idx = fp.piece.idx;
         let offset = idx * self.piece_len;
 
-        for (i, byte) in fp.data.into_iter().enumerate() {
-            self.bytes[offset + i] = byte
-        }
+        self.file.seek(SeekFrom::Start(offset as u64))?;
+        self.file.write_all(&fp.data)?;
 
         Ok(())
     }
@@ -376,7 +383,8 @@ pub async fn download_file(
     client_id: PeerID,
     peers: Peers,
     download_req: DownloadRequest,
-) -> Result<Vec<u8>> {
+    output_path: PathBuf,
+) -> Result<()> {
     debug!("Have {} pieces to download.", download_req.pieces.len());
     debug!("Piece len is {}.", download_req.piece_length);
     debug!("Total length is {}.", download_req.length);
@@ -389,7 +397,6 @@ pub async fn download_file(
     let piece_len = download_req.piece_length;
     let last_piece_len = download_req.last_piece_len();
     let pieces_cnt = download_req.pieces.len();
-    let total_len = download_req.length;
 
     // Spawn multiple job executors, one for each available Peer.
     let handles = setup_peer_workers(PeerWorkerSetup {
@@ -424,8 +431,7 @@ pub async fn download_file(
     debug!("Closed job channels.");
 
     // Wait for results and gather them.
-    // TODO: Stream directly into file.
-    let mut df = DownloadingFile::new(piece_len, total_len);
+    let mut df = DownloadingFile::new(piece_len, output_path)?;
     while let Some(full_piece) = result_rx.recv().await {
         debug!(
             "Received FullPiece {} at {}",
@@ -435,7 +441,7 @@ pub async fn download_file(
                 .expect("Time went backwards")
                 .as_micros()
         );
-        df.add_full_piece(full_piece)?;
+        df.write_full_piece(full_piece)?;
     }
 
     // Collect results from all spawned tasks
@@ -445,7 +451,7 @@ pub async fn download_file(
         }
     }
 
-    Ok(df.bytes)
+    Ok(())
 }
 
 pub async fn perform_download_piece(
@@ -626,50 +632,6 @@ mod tests {
         let random_data: Vec<u8> = (0..1337).map(|_| rand::random::<u8>()).collect();
         smaller_piece_bytes.extend_from_slice(&random_data);
         PiecePayload::from_bytes(&smaller_piece_bytes)?;
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_downloading_file_add_full_piece() -> Result<(), Box<dyn std::error::Error>> {
-        let data = "this is some text";
-        let piece_len = data.len();
-        let mut df = DownloadingFile::new(piece_len, piece_len * 3);
-        let mut rng = rand::thread_rng();
-
-        let first_piece = FullPiece {
-            data: data.into(),
-            piece: Piece {
-                hash: Hash::new(rng.gen()),
-                idx: 0,
-                len: piece_len,
-            },
-        };
-        df.add_full_piece(first_piece)?;
-
-        let data2 = "THIS IS SOME TEXT";
-        assert_eq!(piece_len, data2.len());
-
-        let third_piece = FullPiece {
-            data: data2.into(),
-            piece: Piece {
-                hash: Hash::new(rng.gen()),
-                idx: 2,
-                len: piece_len,
-            },
-        };
-        df.add_full_piece(third_piece)?;
-
-        assert_eq!(
-            data.as_bytes(),
-            df.bytes.get(0..17).ok_or("bytes should have first piece")?
-        );
-        assert_eq!(
-            data2.as_bytes(),
-            df.bytes
-                .get(34..51)
-                .ok_or("bytes should have third piece")?
-        );
 
         Ok(())
     }

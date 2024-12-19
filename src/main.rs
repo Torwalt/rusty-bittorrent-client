@@ -129,14 +129,7 @@ async fn main() -> Result<()> {
             let peer_client = peers::Client::new(id.clone())?;
             let peers = peer_client.find_peers(torrent.to_peer_request()).await?;
 
-            let file_data = tracker::download_file(id, peers, download_req).await?;
-
-            let mut file = fs::OpenOptions::new()
-                .write(true)
-                .truncate(true)
-                .create(true)
-                .open(output_path)?;
-            file.write_all(&file_data)?;
+            tracker::download_file(id, peers, download_req, output_path.to_owned()).await?;
         }
         None => {}
     };
