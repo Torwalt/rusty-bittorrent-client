@@ -1,35 +1,50 @@
-[![progress-banner](https://backend.codecrafters.io/progress/bittorrent/afb3c197-3c02-4f3f-81f5-1270a7741d0a)](https://app.codecrafters.io/users/codecrafters-bot?r=2qF)
+# Bittorrent implementation (in parts) as per codecrafters
 
-This is a starting point for Rust solutions to the
-["Build Your Own BitTorrent" Challenge](https://app.codecrafters.io/courses/bittorrent/overview).
+This project followed the steps from the codecrafters Bittorrent challenge
+<https://app.codecrafters.io/courses/bittorrent/overview>
 
-In this challenge, you’ll build a BitTorrent client that's capable of parsing a
-.torrent file and downloading a file from a peer. Along the way, we’ll learn
-about how torrent files are structured, HTTP trackers, BitTorrent’s Peer
-Protocol, pipelining and more.
-
-**Note**: If you're viewing this repo on GitHub, head over to
-[codecrafters.io](https://codecrafters.io) to try the challenge.
-
-# Passing the first stage
-
-The entry point for your BitTorrent implementation is in `src/main.rs`. Study
-and uncomment the relevant code, and push your changes to pass the first stage:
-
-```sh
-git commit -am "pass 1st stage" # any msg
-git push origin master
+A full file can be downloaded with  
+```bash
+cargo run -- download -o $OUTPUT_PATH sample.torrent
 ```
 
-Time to move on to the next stage!
+The resulting file can be diff'd against the `golden-result` file.
 
-# Stage 2 & beyond
+I've implemented the download to run over all available Peers. Each downloaded
+piece is streamed into the File at the correct index.
 
-Note: This section is for stages 2 and beyond.
+Run  
+```bash
+cargo run -- help
+```
 
-1. Ensure you have `cargo (1.82)` installed locally
-1. Run `./your_bittorrent.sh` to run your program, which is implemented in
-   `src/main.rs`. This command compiles your Rust project, so it might be slow
-   the first time you run it. Subsequent runs will be fast.
-1. Commit your changes and run `git push origin master` to submit your solution
-   to CodeCrafters. Test output will be streamed to your terminal.
+to see the other available commands!
+
+The program will work so long as the codecrafters bittorrent is online.
+
+## Thoughts
+
+This project was insanely fun. Not only did I explore the bittorrent protocol
+and bencode but also touched lower level topics such as working directly on a
+TCP connection.
+
+By doing the challenge with Rust I learned and understood a lot of concepts of the lang:
+
+- ownership, borrowing, moving
+- enums
+- tokio async - tasks and channels
+- testing
+- lifetimes
+- modules
+
+Rust is such an awesome language. Once you are past a certain point, the
+compiler becomes liberating and you are not working against it but with it.
+I am looking forward building more stuff with Rust.
+
+🦀 Rust <3 🦀
+
+## Codecrafters
+
+The branch codecrafters contains the additional files that are needed to run
+this repo in the codecrafters test suite, if ever needed.
+

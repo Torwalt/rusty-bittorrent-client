@@ -366,7 +366,6 @@ fn setup_peer_workers(pws: PeerWorkerSetup) -> Vec<JoinHandle<Result<(), anyhow:
                 while let Ok(job) = job_rx.recv().await {
                     debug!("Executing Job {} on Peer {}", job, peer_info);
                     let full_piece = download_piece(job, &mut stream).await?;
-                    // TODO: Retry.
                     result_tx.send(full_piece).await?;
                 }
                 debug!("Closing connection to Peer {}", peer_info);
@@ -444,7 +443,10 @@ pub async fn download_file(
         df.write_full_piece(full_piece).await?;
     }
 
-    // Collect results from all spawned tasks
+    // Report if any peers failed. In a real scenario, we would introduce retry mechanisms, e.g.
+    // retry with same peer, or just put the job back into the channel so another Peer worker can
+    // grab it. However, as I am developing against a specific bittorrent impl, there are no
+    // error cases.
     for handle in handles {
         if let Err(e) = handle.await? {
             bail!("Task failed: {:?}", e);
@@ -588,7 +590,6 @@ async fn handshake(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::Rng;
 
     #[test]
     fn test_request_payload_gen_next() -> Result<(), Box<dyn std::error::Error>> {
