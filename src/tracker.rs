@@ -1,11 +1,10 @@
 use core::fmt;
-use std::fs::{self, File};
 use std::io::SeekFrom;
-use std::io::{Seek, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::fs::File;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -218,22 +217,23 @@ struct DownloadingFile {
 }
 
 impl DownloadingFile {
-    fn new(piece_len: usize, dest: PathBuf) -> Result<Self> {
-        let file = fs::OpenOptions::new()
+    async fn new(piece_len: usize, dest: PathBuf) -> Result<Self> {
+        let file = tokio::fs::OpenOptions::new()
             .write(true)
             .truncate(true)
             .create(true)
-            .open(dest)?;
+            .open(dest)
+            .await?;
 
         Ok(Self { piece_len, file })
     }
 
-    fn write_full_piece(&mut self, fp: FullPiece) -> Result<()> {
+    async fn write_full_piece(&mut self, fp: FullPiece) -> Result<()> {
         let idx = fp.piece.idx;
         let offset = idx * self.piece_len;
 
-        self.file.seek(SeekFrom::Start(offset as u64))?;
-        self.file.write_all(&fp.data)?;
+        self.file.seek(SeekFrom::Start(offset as u64)).await?;
+        self.file.write_all(&fp.data).await?;
 
         Ok(())
     }
@@ -431,7 +431,7 @@ pub async fn download_file(
     debug!("Closed job channels.");
 
     // Wait for results and gather them.
-    let mut df = DownloadingFile::new(piece_len, output_path)?;
+    let mut df = DownloadingFile::new(piece_len, output_path).await?;
     while let Some(full_piece) = result_rx.recv().await {
         debug!(
             "Received FullPiece {} at {}",
@@ -441,7 +441,7 @@ pub async fn download_file(
                 .expect("Time went backwards")
                 .as_micros()
         );
-        df.write_full_piece(full_piece)?;
+        df.write_full_piece(full_piece).await?;
     }
 
     // Collect results from all spawned tasks
