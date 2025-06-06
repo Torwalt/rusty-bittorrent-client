@@ -12,3 +12,8 @@ target/
 test-piece
 
 .envrc
+result
+.rustup/
+.zsh/
+.cargo/
+local/
